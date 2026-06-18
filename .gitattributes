@@ -1,0 +1,29 @@
+* text=auto eol=lf
+
+# Source and configuration files
+*.py text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.txt text eol=lf
+*.sh text eol=lf
+.githooks/* text eol=lf
+
+# Windows command files
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary diagnostics and assets
+*.wav binary
+*.m4a binary
+*.mp3 binary
+*.aac binary
+*.flac binary
+*.mp4 binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary

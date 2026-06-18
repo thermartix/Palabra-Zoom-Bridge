@@ -1,0 +1,25 @@
+[translation]
+source_language = "es"
+target_language = "de"
+voice_id = "your-voice-id"
+
+[zoom]
+# These are the devices selected inside Zoom. The bridge uses the matching
+# opposite cable sides automatically.
+speaker_device = "CABLE-B Input"
+mic_device = "CABLE-A Output"
+
+[audio]
+api_rate = 24000
+channels = 1
+hostapi_preference = ["Windows WASAPI", "Windows DirectSound", "MME", "Windows WDM-KS"]
+
+[bridge]
+chunk_ms = 320
+input_block_ms = 0
+playback_buffer_ms = 300
+startup_delay = 3.0
+
+[diagnostics]
+test_seconds = 3.0
+test_volume = 0.5
