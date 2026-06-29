@@ -1,5 +1,7 @@
 # Palabra Zoom Bridge
 
+Version: 0.2.0
+
 Local MVP bridge for one Zoom interpretation channel:
 
 ```text
@@ -59,7 +61,11 @@ playback_buffer_ms = 500
 playback_fade_ms = 5
 idle_noise_amplitude = 0
 output_gain = 0.55
-startup_delay = 3.0
+startup_delay = 0.0
+task_ready_timeout_seconds = 30.0
+task_poll_seconds = 2.0
+end_task_eos_timeout_seconds = 2.0
+graceful_shutdown_timeout_seconds = 6.0
 
 [palabra]
 segment_confirmation_silence_threshold = 0.3
@@ -79,15 +85,19 @@ record_output_wav = false
 
 `voice_id` is optional. When set, the bridge passes it through to Palabra speech generation for the interpreted audio.
 
-`channels` controls the Palabra websocket audio format. `device_channels` controls the local Windows virtual cable streams. The proven-good setup keeps Palabra mono and writes stereo into Zoom's microphone cable, which prevents silent interpretation audio with VB-Cable endpoints that appear as multi-channel DirectSound devices.
+`channels` controls the Palabra websocket input format. Palabra websocket output is handled as fixed 24 kHz mono audio, per the API contract, and is then resampled/remixed for the local cable. `device_channels` controls the local Windows virtual cable streams. The proven-good setup keeps Palabra input mono and writes stereo into Zoom's microphone cable, which prevents silent interpretation audio with VB-Cable endpoints that appear as multi-channel DirectSound devices.
 
-`playback_buffer_ms` is the base jitter buffer before audio is released to Zoom's microphone cable. The live default is intentionally low so listeners hear the interpretation close to real time. If playback underruns, the bridge grows the buffer in 500 ms steps up to 5000 ms, then relaxes it back down after stable playback. The bridge uses Palabra phrase boundaries from `output_audio_data.transcription.last_chunk` when available: if playback reserve is low at a phrase end, it waits there instead of starting the next phrase with too little buffered audio. A local quiet-block gate remains as a fallback.
+`playback_buffer_ms` is the base jitter buffer before audio is released to Zoom's microphone cable. Set it in `config.toml` to 300 ms or higher; lower values are not recommended for stable live playback. `phrase_start_buffer_ms` is a larger first-phrase buffer that smooths Palabra chunk jitter before partial phrase audio is released; raise it if words still split with silence, or lower it if latency matters more. The bridge groups Palabra audio by `transcription_id`, `translation_part_id`, and language, then waits to release the start of each phrase until it has enough audio for the phrase-start buffer or Palabra marks the phrase complete with `last_chunk`. If playback still underruns during active speech, the bridge holds the remaining partial audio for the next refill instead of playing a tiny word fragment into silence, grows the buffer in small 200 ms steps, and later relaxes back down after stable playback. A local quiet-block gate remains as a fallback.
 
 `playback_fade_ms`, `idle_noise_amplitude`, and `output_gain` control the exact stream sent into Zoom's microphone cable. With Zoom Original Sound enabled, keep `idle_noise_amplitude = 0` unless you are specifically testing Zoom gating. `output_gain` reduces the translated signal before Zoom so downstream automatic gain or recording does not clip.
+
+`startup_delay` is now only an optional extra settle delay after Palabra reports `current_task`; normal startup readiness is driven by `get_task` polling. Manual Ctrl+C shutdown sends Palabra `end_task` and waits briefly for EOS so the last interpreted phrase can drain. Zoom meeting-ended shutdown closes immediately because there is no meeting audio path left.
 
 The `[palabra]` section is tuned for live interpretation rather than offline dubbing. `segment_confirmation_silence_threshold` controls how much silence Palabra waits for before confirming a segment; lower values reduce long waits but can split phrases earlier. `only_confirm_by_silence` can force stricter phrase confirmation at the cost of latency, `sentence_splitter_enabled` allows long sentences to become smaller phrase chunks, and the queue level values keep a modest translated-speech reserve. Palabra documents `desired_queue_level_ms` as starting at 2000 ms, so this config uses the lowest valid value. `auto_tempo` lets Palabra speak slightly faster, up to `max_tempo`, when it needs to catch up.
 
 The `[zoom]` devices should match what you selected in Zoom. For the example above, the script records from the matching `CABLE-B Output` side and plays translated audio into the matching `CABLE-A Input` side automatically.
+
+By default, `zoom.end_bridge_when_meeting_ends = true` watches for a visible Zoom meeting or webinar window. After that window has been seen once, the bridge stops and closes the Palabra session if the matching window title disappears for `meeting_end_grace_seconds`. If Zoom uses a localized or custom title on this machine, add a stable substring to `zoom.meeting_title_patterns`; use `--no-end-when-zoom-meeting-ends` to disable this for a run.
 
 Device settings can be name substrings like `"CABLE-B Input"` or exact numeric ids from `--list-devices`. Numeric ids are machine-specific, so prefer names in `config.toml`.
 

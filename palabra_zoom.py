@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import base64
 import ctypes
+import ctypes.wintypes
 import dataclasses
 import json
 import os
@@ -31,25 +32,43 @@ from scipy.signal import resample_poly
 
 SESSION_URL = "https://api.palabra.ai/session-storage/session"
 SESSIONS_URL = "https://api.palabra.ai/session-storage/sessions"
+APP_VERSION = "0.2.0"
 CONFIG_PATH = Path("config.toml")
 LOG_DIR = Path("logs")
 CABLE_ROUTE_LOG_PATH = LOG_DIR / "cable_route.log"
 LAST_ERROR_LOG_PATH = LOG_DIR / "last_error.txt"
 DEFAULT_ZOOM_SPEAKER_DEVICE = "CABLE-B Input"
 DEFAULT_ZOOM_MIC_DEVICE = "CABLE-A Output"
+DEFAULT_END_WHEN_ZOOM_MEETING_ENDS = True
+DEFAULT_ZOOM_MEETING_TITLE_PATTERNS = (
+    "Zoom Meeting",
+    "Zoom Webinar",
+)
+DEFAULT_ZOOM_MEETING_CHECK_SECONDS = 2.0
+DEFAULT_ZOOM_MEETING_END_GRACE_SECONDS = 15.0
 DEFAULT_DEVICE_RATE = 48000
 DEFAULT_API_RATE = 24000
 DEFAULT_CHANNELS = 1
+PALABRA_OUTPUT_RATE = 24000
+PALABRA_OUTPUT_CHANNELS = 1
 DEFAULT_DEVICE_CHANNELS = 2
 DEFAULT_CHUNK_MS = 320
 DEFAULT_INPUT_BLOCK_MS = 0
 DEFAULT_PLAYBACK_BUFFER_MS = 500
+DEFAULT_PHRASE_START_BUFFER_MS = 1800
 DEFAULT_PLAYBACK_MAX_BUFFER_MS = 5000
-DEFAULT_STARTUP_DELAY = 3.0
+DEFAULT_STARTUP_DELAY = 0.0
+DEFAULT_TASK_READY_TIMEOUT_SECONDS = 30.0
+DEFAULT_TASK_POLL_SECONDS = 2.0
+DEFAULT_END_TASK_EOS_TIMEOUT_SECONDS = 2.0
+DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS = 6.0
+DEFAULT_PLAYBACK_DRAIN_TIMEOUT_SECONDS = 30.0
+DEFAULT_RAW_PALABRA_PLAYBACK = False
 DEFAULT_OUTPUT_GAIN = 0.55
 DEFAULT_SEGMENT_CONFIRMATION_SILENCE_THRESHOLD = 0.3
 DEFAULT_ONLY_CONFIRM_BY_SILENCE = False
 DEFAULT_SENTENCE_SPLITTER_ENABLED = True
+DEFAULT_PALABRA_TRANSLATE_PARTIALS = True
 DEFAULT_PALABRA_DESIRED_QUEUE_LEVEL_MS = 2000
 DEFAULT_PALABRA_MAX_QUEUE_LEVEL_MS = 5000
 DEFAULT_PALABRA_AUTO_TEMPO = True
@@ -60,8 +79,13 @@ DEFAULT_TEST_VOLUME = 0.5
 DEFAULT_RECORD_OUTPUT_WAV = False
 DEFAULT_DEVICE_PROBE_SECONDS = 0.15
 PLAYBACK_BUFFER_STEP_MS = 500
+PLAYBACK_ACTIVE_UNDERRUN_STEP_MS = 200
 PLAYBACK_BUFFER_RELAX_SECONDS = 30.0
 PLAYBACK_SILENCE_RMS = 120.0
+PLAYBACK_START_LOOKAHEAD_MS = 2500
+PLAYBACK_CATCHUP_TARGET_MS = 1200
+PLAYBACK_CATCHUP_FULL_BACKLOG_MS = 4000
+PLAYBACK_MAX_LOCAL_TEMPO = 1.06
 DEFAULT_PLAYBACK_FADE_MS = 5
 DEFAULT_IDLE_NOISE_AMPLITUDE = 96
 BLOCKED_HOSTAPIS = {"Windows WASAPI"}
@@ -93,6 +117,10 @@ LANGUAGE_NAMES = {
     "uk": "Ukrainian",
     "zh": "Chinese",
 }
+
+
+class PalabraRuntimeError(RuntimeError):
+    pass
 
 
 def language_label(language_code: str) -> str:
@@ -489,8 +517,9 @@ def can_open_bridge_pair(
     output_device: int,
     device_rate: int,
     channels: int,
+    input_block_ms: int,
 ) -> tuple[bool, Optional[sd.PortAudioError]]:
-    blocksize = stream_blocksize(device_rate, DEFAULT_INPUT_BLOCK_MS)
+    blocksize = stream_blocksize(device_rate, input_block_ms)
 
     def input_callback(indata, frames, time_info, status):
         pass
@@ -605,6 +634,7 @@ def auto_select_bridge_devices(args) -> tuple[int, int, int]:
                 output_device,
                 device_rate,
                 args.device_channels,
+                args.input_block_ms,
             )
             if not can_open:
                 hostapi = hostapi_name(devices[speaker_zoom], hostapis)
@@ -673,12 +703,16 @@ def print_sample_rate_hint(error: Exception, device: int, requested_rate: int) -
     raise error
 
 
-def resample_int16(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
+def resample_int16(audio: np.ndarray, source_rate: int, target_rate: int, gain: float = 1.0) -> np.ndarray:
+    gain = max(0.0, float(gain))
     if source_rate == target_rate or len(audio) == 0:
-        return audio.astype(np.int16, copy=False)
+        if gain == 1.0:
+            return audio.astype(np.int16, copy=False)
+        scaled = np.rint(audio.astype(np.float32) * gain)
+        return np.clip(scaled, -32768, 32767).astype(np.int16)
 
     ratio = Fraction(target_rate, source_rate).limit_denominator()
-    resampled = resample_poly(audio.astype(np.float32), ratio.numerator, ratio.denominator)
+    resampled = resample_poly(audio.astype(np.float32) * gain, ratio.numerator, ratio.denominator)
     return np.clip(np.rint(resampled), -32768, 32767).astype(np.int16)
 
 
@@ -738,6 +772,7 @@ async def configure_translation(
     segment_confirmation_silence_threshold: float,
     only_confirm_by_silence: bool,
     sentence_splitter_enabled: bool,
+    translate_partial_transcriptions: bool,
     desired_queue_level_ms: int,
     max_queue_level_ms: int,
     auto_tempo: bool,
@@ -765,8 +800,8 @@ async def configure_translation(
                 "target": {
                     "type": "ws",
                     "format": "pcm_s16le",
-                    "sample_rate": api_rate,
-                    "channels": channels,
+                    "sample_rate": PALABRA_OUTPUT_RATE,
+                    "channels": PALABRA_OUTPUT_CHANNELS,
                 },
             },
             "pipeline": {
@@ -782,7 +817,7 @@ async def configure_translation(
                 "translations": [
                     {
                         "target_language": target_language,
-                        "translate_partial_transcriptions": False,
+                        "translate_partial_transcriptions": translate_partial_transcriptions,
                         "speech_generation": speech_generation,
                     }
                 ],
@@ -805,6 +840,151 @@ async def configure_translation(
         },
     }
     await websocket.send(json.dumps(settings))
+
+
+
+def parse_palabra_message(raw_message) -> tuple[Optional[str], dict]:
+    if isinstance(raw_message, bytes):
+        raw_message = raw_message.decode("utf-8")
+    message = json.loads(raw_message)
+    data = message.get("data", {})
+    if isinstance(data, str):
+        data = json.loads(data)
+    if not isinstance(data, dict):
+        data = {}
+    return message.get("message_type"), data
+
+
+def format_palabra_message_details(data: dict) -> str:
+    if not isinstance(data, dict):
+        return str(data)
+    code = data.get("code") or data.get("error_code") or data.get("type")
+    desc = data.get("desc") or data.get("description") or data.get("message") or data.get("detail")
+    parts = []
+    if code:
+        parts.append(str(code))
+    if desc:
+        parts.append(str(desc))
+    return ": ".join(parts) if parts else json.dumps(data, ensure_ascii=False)
+
+
+def current_task_is_ready(data: dict) -> bool:
+    if not data:
+        return False
+    current_task = data.get("current_task", data)
+    if not isinstance(current_task, dict):
+        return True
+    status = current_task.get("task_status") or current_task.get("status") or current_task.get("state")
+    if isinstance(status, str) and status.lower() in {"error", "failed", "ended", "stopped"}:
+        raise PalabraRuntimeError(format_palabra_message_details(current_task))
+    return bool(current_task)
+
+def is_palabra_task_not_ready_error(data: dict) -> bool:
+    if not isinstance(data, dict):
+        return False
+    code = data.get("code") or data.get("error_code") or data.get("type")
+    return isinstance(code, str) and code.upper() == "NOT_FOUND"
+
+
+async def wait_for_current_task(websocket, poll_seconds: float, timeout_seconds: float) -> None:
+    poll_seconds = min(2.0, max(0.25, float(poll_seconds)))
+    deadline = time.monotonic() + max(poll_seconds, float(timeout_seconds))
+    next_poll = 0.0
+
+    while time.monotonic() < deadline:
+        now = time.monotonic()
+        if now >= next_poll:
+            await websocket.send(
+                json.dumps(
+                    {
+                        "message_type": "get_task",
+                        "data": {"exclude_hidden": True},
+                    }
+                )
+            )
+            next_poll = now + poll_seconds
+
+        try:
+            raw_message = await asyncio.wait_for(websocket.recv(), timeout=poll_seconds)
+        except asyncio.TimeoutError:
+            continue
+
+        msg_type, data = parse_palabra_message(raw_message)
+        if msg_type == "current_task":
+            if current_task_is_ready(data):
+                print("Palabra task is ready.", flush=True)
+                return
+        elif msg_type == "warning":
+            print(f"[palabra warning] {format_palabra_message_details(data)}", flush=True)
+        elif msg_type == "error":
+            if is_palabra_task_not_ready_error(data):
+                continue
+            raise PalabraRuntimeError(format_palabra_message_details(data))
+
+    raise TimeoutError("Timed out waiting for Palabra current_task after set_task.")
+
+
+async def end_palabra_task(websocket, eos_timeout_seconds: float) -> None:
+    await websocket.send(
+        json.dumps(
+            {
+                "message_type": "end_task",
+                "data": {"eos_timeout": max(0.0, float(eos_timeout_seconds))},
+            }
+        )
+    )
+
+
+async def graceful_stop_palabra_task(
+    websocket,
+    receive_task: asyncio.Task,
+    eos_timeout_seconds: float,
+    shutdown_timeout_seconds: float,
+) -> None:
+    if receive_task.done():
+        return
+    try:
+        await end_palabra_task(websocket, eos_timeout_seconds)
+    except Exception as exc:
+        print(f"Warning: could not send Palabra end_task: {exc}", flush=True)
+        return
+
+    try:
+        await asyncio.wait_for(receive_task, timeout=max(0.5, float(shutdown_timeout_seconds)))
+    except asyncio.TimeoutError:
+        print("Palabra did not finish before graceful shutdown timeout; closing websocket.", flush=True)
+    except PalabraRuntimeError:
+        raise
+    except Exception as exc:
+        print(f"Warning: Palabra receive loop ended during shutdown: {exc}", flush=True)
+
+
+def validate_runtime_args(args) -> None:
+    if args.api_rate < 16000 or args.api_rate > 48000:
+        raise SystemExit("audio.api_rate must be between 16000 and 48000 for Palabra websocket input.")
+    if args.chunk_ms <= 0:
+        raise SystemExit("bridge.chunk_ms must be greater than 0.")
+    raw_chunk_bytes = int(args.api_rate * args.chunk_ms / 1000) * args.channels * 2
+    if raw_chunk_bytes < 1024:
+        raise SystemExit(
+            "bridge.chunk_ms is too small for Palabra websocket audio payloads; "
+            f"current raw chunk is {raw_chunk_bytes} bytes, minimum is 1024."
+        )
+    if raw_chunk_bytes > 512 * 1024:
+        raise SystemExit(
+            "bridge.chunk_ms is too large for Palabra websocket audio payloads; "
+            f"current raw chunk is {raw_chunk_bytes} bytes, maximum is 512 KiB."
+        )
+    if args.playback_buffer_ms < 0:
+        raise SystemExit("bridge.playback_buffer_ms must be zero or greater.")
+    if args.phrase_start_buffer_ms < 0:
+        raise SystemExit("bridge.phrase_start_buffer_ms must be zero or greater.")
+    if args.task_ready_timeout <= 0:
+        raise SystemExit("bridge.task_ready_timeout_seconds must be greater than 0.")
+    if args.task_poll_seconds <= 0:
+        raise SystemExit("bridge.task_poll_seconds must be greater than 0.")
+    if args.playback_drain_timeout < 0:
+        raise SystemExit("bridge.playback_drain_timeout_seconds must be zero or greater.")
 
 
 def load_config(config_path: Path = CONFIG_PATH) -> dict:
@@ -963,19 +1143,23 @@ class AudioBridge:
         device_channels: int,
         input_block_ms: int,
         playback_buffer_ms: int,
+        phrase_start_buffer_ms: int,
         playback_fade_ms: int,
         idle_noise_amplitude: int,
         output_gain: float,
-        record_output_wav: bool,
+        raw_palabra_playback: bool,
     ) -> None:
         self.input_device = input_device
         self.output_device = output_device
         self.device_rate = device_rate
         self.api_rate = api_rate
+        self.output_api_rate = PALABRA_OUTPUT_RATE
         self.chunk_samples = int(api_rate * chunk_ms / 1000)
         self.api_channels = api_channels
+        self.output_api_channels = PALABRA_OUTPUT_CHANNELS
         self.device_channels = device_channels
         self.output_gain = max(0.0, float(output_gain))
+        self.raw_palabra_playback = bool(raw_palabra_playback)
         self.input_blocksize = stream_blocksize(device_rate, input_block_ms)
         self.playback_base_preroll_samples = int(device_rate * playback_buffer_ms / 1000) * device_channels
         self.playback_max_preroll_samples = (
@@ -983,7 +1167,22 @@ class AudioBridge:
             * device_channels
         )
         self.playback_preroll_samples = self.playback_base_preroll_samples
+        self.phrase_start_preroll_samples = (
+            int(device_rate * max(playback_buffer_ms, phrase_start_buffer_ms) / 1000) * device_channels
+        )
         self.playback_preroll_step_samples = int(device_rate * PLAYBACK_BUFFER_STEP_MS / 1000) * device_channels
+        self.playback_active_underrun_step_samples = (
+            int(device_rate * PLAYBACK_ACTIVE_UNDERRUN_STEP_MS / 1000) * device_channels
+        )
+        self.playback_start_lookahead_samples = (
+            int(device_rate * PLAYBACK_START_LOOKAHEAD_MS / 1000) * device_channels
+        )
+        self.playback_catchup_target_samples = (
+            int(device_rate * PLAYBACK_CATCHUP_TARGET_MS / 1000) * device_channels
+        )
+        self.playback_catchup_full_backlog_samples = (
+            int(device_rate * PLAYBACK_CATCHUP_FULL_BACKLOG_MS / 1000) * device_channels
+        )
         self.playback_fade_frames = max(1, int(device_rate * playback_fade_ms / 1000))
         noise_frames = max(device_rate, self.playback_fade_frames)
         noise_rng = np.random.default_rng(1)
@@ -996,9 +1195,13 @@ class AudioBridge:
         )
         self.idle_noise_offset = 0
         self.capture_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=300)
-        self.playback_queue: queue.Queue[PlaybackChunk] = queue.Queue(maxsize=300)
+        self.playback_queue: queue.Queue[PlaybackChunk] = queue.Queue()
         self.playback_buffer = np.array([], dtype=np.int16)
         self.playback_segment_end_offsets: list[int] = []
+        self.pending_playback_phrase_key: Optional[tuple[str, str, str]] = None
+        self.pending_playback_phrase_chunks: list[np.ndarray] = []
+        self.pending_playback_phrase_samples = 0
+        self.pending_playback_phrase_released = False
         self.playback_started = False
         self.last_playback_underrun = time.monotonic()
         self.stop_event = threading.Event()
@@ -1006,7 +1209,6 @@ class AudioBridge:
         self.playback_dropped = 0
         self.playback_status_count = 0
         self.output_audio_chunks = 0
-        self.record_output_wav = record_output_wav
         self.dumped_palabra_message_types: set[str] = set()
         self.api_output_recorder: Optional[WavDebugRecorder] = None
         self.device_output_recorder: Optional[WavDebugRecorder] = None
@@ -1015,6 +1217,14 @@ class AudioBridge:
         self.last_no_output_warning = 0.0
         self.last_capture_drop_notice = 0.0
         self.last_playback_drop_notice = 0.0
+        self.last_playback_hold_notice = 0.0
+        self.playback_partial_holds = 0
+        self.stop_reason = ""
+
+    def request_stop(self, reason: str) -> None:
+        if not self.stop_reason:
+            self.stop_reason = reason
+        self.stop_event.set()
 
     def _playback_block_is_quiet(self, audio: np.ndarray) -> bool:
         if len(audio) == 0:
@@ -1024,10 +1234,12 @@ class AudioBridge:
         rms = float(np.sqrt(np.mean(mono * mono))) if len(mono) else 0.0
         return rms <= PLAYBACK_SILENCE_RMS
 
-    def _increase_playback_preroll(self) -> None:
+    def _increase_playback_preroll(self, step_samples: Optional[int] = None) -> None:
+        if step_samples is None:
+            step_samples = self.playback_preroll_step_samples
         self.playback_preroll_samples = min(
             self.playback_max_preroll_samples,
-            self.playback_preroll_samples + self.playback_preroll_step_samples,
+            self.playback_preroll_samples + step_samples,
         )
         self.last_playback_underrun = time.monotonic()
 
@@ -1052,6 +1264,67 @@ class AudioBridge:
             if 0 < offset <= sample_count:
                 return offset
         return None
+
+    def _first_segment_end_offset(self) -> Optional[int]:
+        for offset in self.playback_segment_end_offsets:
+            if offset > 0:
+                return offset
+        return None
+
+    def _queue_playback_chunk(self, audio: np.ndarray, segment_end: bool) -> None:
+        if len(audio) == 0 and not segment_end:
+            return
+        self.playback_queue.put_nowait(PlaybackChunk(audio, segment_end=segment_end))
+
+    def _reset_pending_playback_phrase(self) -> None:
+        self.pending_playback_phrase_key = None
+        self.pending_playback_phrase_chunks = []
+        self.pending_playback_phrase_samples = 0
+        self.pending_playback_phrase_released = False
+
+    def _release_pending_playback_phrase(self, segment_end: bool) -> None:
+        if not self.pending_playback_phrase_chunks:
+            if segment_end:
+                self._reset_pending_playback_phrase()
+            return
+
+        if len(self.pending_playback_phrase_chunks) == 1:
+            audio = self.pending_playback_phrase_chunks[0]
+        else:
+            audio = np.concatenate(self.pending_playback_phrase_chunks)
+        self._queue_playback_chunk(audio, segment_end=segment_end)
+        self.pending_playback_phrase_chunks = []
+        self.pending_playback_phrase_samples = 0
+
+        if segment_end:
+            self._reset_pending_playback_phrase()
+        else:
+            self.pending_playback_phrase_released = True
+
+    def _enqueue_phrase_playback(
+        self,
+        audio: np.ndarray,
+        segment_end: bool,
+        phrase_key: Optional[tuple[str, str, str]],
+    ) -> None:
+        if phrase_key is None:
+            self._queue_playback_chunk(audio, segment_end=segment_end)
+            return
+
+        if self.pending_playback_phrase_key != phrase_key:
+            self._release_pending_playback_phrase(segment_end=False)
+            self.pending_playback_phrase_key = phrase_key
+
+        if self.pending_playback_phrase_released:
+            self._queue_playback_chunk(audio, segment_end=segment_end)
+            if segment_end:
+                self._reset_pending_playback_phrase()
+            return
+
+        self.pending_playback_phrase_chunks.append(audio)
+        self.pending_playback_phrase_samples += len(audio)
+        if segment_end or self.pending_playback_phrase_samples >= self.phrase_start_preroll_samples:
+            self._release_pending_playback_phrase(segment_end=segment_end)
 
     def _idle_audio(self, sample_count: int) -> np.ndarray:
         if sample_count <= 0:
@@ -1090,6 +1363,43 @@ class AudioBridge:
         shaped[start:active_frames] = np.rint(
             shaped[start:active_frames].astype(np.float32) * ramp
         ).astype(np.int16)
+
+    def _playback_catchup_tempo(self) -> float:
+        target_samples = max(self.playback_preroll_samples, self.playback_catchup_target_samples)
+        backlog_samples = max(0, len(self.playback_buffer) - target_samples)
+        if backlog_samples <= 0:
+            return 1.0
+        ramp_samples = max(self.device_channels, self.playback_catchup_full_backlog_samples)
+        catchup = min(1.0, backlog_samples / float(ramp_samples))
+        return 1.0 + ((PLAYBACK_MAX_LOCAL_TEMPO - 1.0) * catchup)
+
+    def _speed_adjust_playback_slice(self, audio: np.ndarray, output_samples: int) -> np.ndarray:
+        if len(audio) == output_samples:
+            return audio.copy()
+        input_frames = len(audio) // self.device_channels
+        output_frames = output_samples // self.device_channels
+        if input_frames <= 0 or output_frames <= 0:
+            return np.zeros(output_samples, dtype=np.int16)
+
+        shaped = audio.reshape(input_frames, self.device_channels).astype(np.float32)
+        ratio = Fraction(output_frames, input_frames).limit_denominator(1000)
+        adjusted = resample_poly(shaped, ratio.numerator, ratio.denominator, axis=0)
+        if len(adjusted) > output_frames:
+            adjusted = adjusted[:output_frames]
+        elif len(adjusted) < output_frames:
+            pad = np.zeros((output_frames - len(adjusted), self.device_channels), dtype=np.float32)
+            adjusted = np.vstack((adjusted, pad))
+        return np.clip(np.rint(adjusted), -32768, 32767).astype(np.int16).reshape(-1)
+
+    def playback_pending_samples(self) -> int:
+        queued_samples = 0
+        with self.playback_queue.mutex:
+            queued_samples = sum(len(chunk.audio) for chunk in self.playback_queue.queue)
+        pending_samples = sum(len(chunk) for chunk in self.pending_playback_phrase_chunks)
+        return len(self.playback_buffer) + queued_samples + pending_samples
+
+    def playback_is_drained(self) -> bool:
+        return self.playback_pending_samples() == 0
 
     def drain_capture_queue(self) -> int:
         drained = 0
@@ -1214,45 +1524,99 @@ class AudioBridge:
                 if next_chunk.segment_end:
                     self.playback_segment_end_offsets.append(buffered_samples)
 
+            if not self.playback_started and self._first_segment_end_offset() is None:
+                start_lookahead_samples = max(target_buffer_samples, self.playback_start_lookahead_samples)
+                while buffered_samples < start_lookahead_samples:
+                    try:
+                        next_chunk = self.playback_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    chunk_audio = next_chunk.audio
+                    chunks.append(chunk_audio)
+                    buffered_samples += len(chunk_audio)
+                    if next_chunk.segment_end:
+                        self.playback_segment_end_offsets.append(buffered_samples)
+                        break
+
             if buffered_samples != len(self.playback_buffer):
                 self.playback_buffer = np.concatenate(chunks)
 
-            segment_end = self._next_segment_end_within(needed)
+            if self.raw_palabra_playback:
+                if len(self.playback_buffer) >= needed:
+                    output_audio = self.playback_buffer[:needed].copy()
+                    outdata[:] = output_audio.reshape(frames, self.device_channels)
+                    self._consume_playback_buffer(needed)
+                    self.playback_started = True
+                elif len(self.playback_buffer) > 0:
+                    output_audio = self._idle_audio(needed)
+                    available_samples = len(self.playback_buffer)
+                    output_audio[:available_samples] = self.playback_buffer
+                    outdata[:] = output_audio.reshape(frames, self.device_channels)
+                    self._consume_playback_buffer(available_samples)
+                    self.playback_started = False
+                else:
+                    self.playback_started = False
+                    self._fill_idle_audio(outdata, frames)
+
+                if self.callback_output_recorder is not None:
+                    self.callback_output_recorder.write(outdata.reshape(-1))
+                return
+
+            first_segment_end = self._first_segment_end_offset()
             if (
-                self.playback_started
+                not self.playback_started
                 and len(self.playback_buffer) < self.playback_preroll_samples
-                and segment_end is not None
+                and first_segment_end is None
             ):
-                output_audio = self._idle_audio(needed)
-                output_audio[:segment_end] = self.playback_buffer[:segment_end]
-                self._fade_out(output_audio, segment_end)
-                outdata[:] = output_audio.reshape(frames, self.device_channels)
-                self._consume_playback_buffer(segment_end)
-                self.playback_started = False
-            elif (
-                self.playback_started
-                and len(self.playback_buffer) < self.playback_preroll_samples
-                and len(self.playback_buffer) >= needed
-                and self._playback_block_is_quiet(self.playback_buffer[:needed])
-            ):
-                output_audio = self.playback_buffer[:needed]
-                self._fade_out(output_audio, needed)
-                outdata[:] = output_audio.reshape(frames, self.device_channels)
-                self._consume_playback_buffer(needed)
-                self.playback_started = False
-            elif not self.playback_started and len(self.playback_buffer) < self.playback_preroll_samples:
                 self._fill_idle_audio(outdata, frames)
             elif len(self.playback_buffer) >= needed:
                 self.playback_started = True
-                output_audio = self.playback_buffer[:needed].copy()
+                tempo = self._playback_catchup_tempo()
+                consume_samples = needed
+                if tempo > 1.0:
+                    consume_frames = min(
+                        len(self.playback_buffer) // self.device_channels,
+                        max(frames + 1, int(round(frames * tempo))),
+                    )
+                    consume_samples = consume_frames * self.device_channels
+                output_audio = self._speed_adjust_playback_slice(
+                    self.playback_buffer[:consume_samples],
+                    needed,
+                )
                 if not was_playing:
                     self._fade_in(output_audio)
                 outdata[:] = output_audio.reshape(frames, self.device_channels)
-                self._consume_playback_buffer(needed)
+                self._consume_playback_buffer(consume_samples)
                 self._relax_playback_preroll()
-            else:
+            elif first_segment_end is not None and first_segment_end <= len(self.playback_buffer):
+                output_audio = self._idle_audio(needed)
+                output_audio[:first_segment_end] = self.playback_buffer[:first_segment_end]
+                if not was_playing:
+                    self._fade_in(output_audio[:first_segment_end])
+                self._fade_out(output_audio, first_segment_end)
+                outdata[:] = output_audio.reshape(frames, self.device_channels)
+                self._consume_playback_buffer(first_segment_end)
                 self.playback_started = False
-                self._increase_playback_preroll()
+            elif was_playing and len(self.playback_buffer) > 0:
+                self.playback_partial_holds += 1
+                now = time.monotonic()
+                if now - self.last_playback_hold_notice >= 5:
+                    held_ms = len(self.playback_buffer) / max(1, self.device_rate * self.device_channels) * 1000
+                    print(
+                        f"[playback] waiting for more translated audio; holding {held_ms:.0f} ms partial block",
+                        flush=True,
+                    )
+                    self.last_playback_hold_notice = now
+                self.playback_started = True
+                self.last_playback_underrun = now
+                self._fill_idle_audio(outdata, frames)
+            else:
+                if was_playing:
+                    self.playback_started = True
+                    self.last_playback_underrun = time.monotonic()
+                else:
+                    self._increase_playback_preroll()
+                    self.playback_started = False
                 self._fill_idle_audio(outdata, frames)
 
             if self.callback_output_recorder is not None:
@@ -1332,13 +1696,8 @@ class AudioBridge:
         dump_messages: bool = False,
     ) -> None:
         async for raw_message in websocket:
-            message = json.loads(raw_message)
-            if isinstance(message.get("data"), str):
-                message["data"] = json.loads(message["data"])
-
-            msg_type = message.get("message_type")
-            data = message.get("data", {})
-            if dump_messages and isinstance(msg_type, str) and isinstance(data, dict):
+            msg_type, data = parse_palabra_message(raw_message)
+            if dump_messages and isinstance(msg_type, str):
                 self._dump_palabra_message_shape(msg_type, data)
 
             if msg_type == "output_audio_data":
@@ -1349,39 +1708,34 @@ class AudioBridge:
                 if not isinstance(encoded_audio, str):
                     continue
                 segment_end = transcription.get("last_chunk") is True
+                transcription_id = transcription.get("transcription_id")
+                translation_part_id = transcription.get("translation_part_id")
+                language = transcription.get("language")
+                phrase_key = (
+                    (str(transcription_id), str(translation_part_id), str(language))
+                    if transcription_id is not None
+                    and translation_part_id is not None
+                    and language is not None
+                    else None
+                )
                 api_audio = np.frombuffer(base64.b64decode(encoded_audio), dtype=np.int16)
                 if self.api_output_recorder is not None:
                     self.api_output_recorder.write(api_audio)
-                device_audio = resample_int16(api_audio, self.api_rate, self.device_rate)
-                device_audio = convert_channels_int16(device_audio, self.api_channels, self.device_channels)
-                if self.output_gain != 1.0:
-                    device_audio = np.clip(
-                        np.rint(device_audio.astype(np.float32) * self.output_gain),
-                        -32768,
-                        32767,
-                    ).astype(np.int16)
+                device_audio = resample_int16(api_audio, self.output_api_rate, self.device_rate, gain=self.output_gain)
+                device_audio = convert_channels_int16(
+                    device_audio,
+                    self.output_api_channels,
+                    self.device_channels,
+                )
                 if self.device_output_recorder is not None:
                     self.device_output_recorder.write(device_audio)
                 self.output_audio_chunks += 1
                 if self.output_audio_chunks == 1:
                     print("[diagnostics] Received translated audio from Palabra.", flush=True)
-                try:
-                    self.playback_queue.put_nowait(PlaybackChunk(device_audio, segment_end=segment_end))
-                except queue.Full:
-                    self.playback_dropped += 1
-                    with contextlib.suppress(queue.Empty):
-                        self.playback_queue.get_nowait()
-                    with contextlib.suppress(queue.Full):
-                        self.playback_queue.put_nowait(
-                            PlaybackChunk(device_audio, segment_end=segment_end)
-                        )
-                    now = time.monotonic()
-                    if now - self.last_playback_drop_notice >= 5:
-                        print(
-                            f"[playback] output is behind; dropped {self.playback_dropped} stale audio blocks",
-                            flush=True,
-                        )
-                        self.last_playback_drop_notice = now
+                if self.raw_palabra_playback:
+                    self._queue_playback_chunk(device_audio, segment_end=False)
+                else:
+                    self._enqueue_phrase_playback(device_audio, segment_end=segment_end, phrase_key=phrase_key)
             elif msg_type == "validated_transcription":
                 text = first_text_value(data, "transcription")
                 if text:
@@ -1404,8 +1758,16 @@ class AudioBridge:
                 text = first_text_value(data, "translation", "translations")
                 if text:
                     print(f"[{language_label(target_language)}] {text}")
+            elif msg_type == "warning":
+                print(f"[palabra warning] {format_palabra_message_details(data)}", flush=True)
+            elif msg_type == "current_task":
+                continue
+            elif msg_type == "eos":
+                self._release_pending_playback_phrase(segment_end=True)
+                print("[palabra] End of stream received.", flush=True)
+                return
             elif msg_type == "error":
-                print(f"[palabra error] {data}", flush=True)
+                raise PalabraRuntimeError(format_palabra_message_details(data))
 
 
 def build_audio_bridge(args) -> AudioBridge:
@@ -1451,10 +1813,11 @@ def build_audio_bridge(args) -> AudioBridge:
         device_channels=args.device_channels,
         input_block_ms=args.input_block_ms,
         playback_buffer_ms=args.playback_buffer_ms,
+        phrase_start_buffer_ms=args.phrase_start_buffer_ms,
         playback_fade_ms=args.playback_fade_ms,
         idle_noise_amplitude=args.idle_noise_amplitude,
         output_gain=args.output_gain,
-        record_output_wav=args.record_output_wav,
+        raw_palabra_playback=args.raw_palabra_playback,
     )
 
 
@@ -1469,8 +1832,6 @@ def start_audio_with_fallback(
     source_language: str,
     target_language: str,
 ) -> tuple[AudioBridge, threading.Thread, sd.OutputStream]:
-    last_error: Optional[sd.PortAudioError] = None
-
     while True:
         bridge = build_audio_bridge(args)
         capture_thread: Optional[threading.Thread] = None
@@ -1480,7 +1841,6 @@ def start_audio_with_fallback(
             playback_stream = bridge.start_playback(target_language)
             return bridge, capture_thread, playback_stream
         except sd.PortAudioError as exc:
-            last_error = exc
             bridge.stop_event.set()
             if playback_stream is not None:
                 with contextlib.suppress(Exception):
@@ -1510,9 +1870,151 @@ def start_audio_with_fallback(
             args.input_device = None
             args.output_device = None
 
-    if last_error is not None:
-        raise last_error
-    raise RuntimeError("Audio startup failed before selecting a device.")
+
+
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+
+def _query_process_image_name(pid: int) -> str:
+    if sys.platform != "win32" or pid <= 0:
+        return ""
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.OpenProcess.argtypes = (
+        ctypes.wintypes.DWORD,
+        ctypes.wintypes.BOOL,
+        ctypes.wintypes.DWORD,
+    )
+    kernel32.OpenProcess.restype = ctypes.wintypes.HANDLE
+    kernel32.QueryFullProcessImageNameW.argtypes = (
+        ctypes.wintypes.HANDLE,
+        ctypes.wintypes.DWORD,
+        ctypes.wintypes.LPWSTR,
+        ctypes.POINTER(ctypes.wintypes.DWORD),
+    )
+    kernel32.QueryFullProcessImageNameW.restype = ctypes.wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (ctypes.wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
+
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return ""
+    try:
+        size = ctypes.wintypes.DWORD(32768)
+        buffer = ctypes.create_unicode_buffer(size.value)
+        if kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+            return buffer.value
+    finally:
+        kernel32.CloseHandle(handle)
+    return ""
+
+
+def _visible_zoom_window_titles() -> list[str]:
+    if sys.platform != "win32":
+        return []
+
+    user32 = ctypes.windll.user32
+    titles: list[str] = []
+
+    enum_windows_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+    @enum_windows_proc
+    def collect_window(hwnd, _lparam):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+
+        pid = ctypes.wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        process_image = _query_process_image_name(int(pid.value)).casefold()
+        if not process_image.endswith("zoom.exe"):
+            return True
+
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buffer, length + 1)
+        title = buffer.value.strip()
+        if title:
+            titles.append(title)
+        return True
+
+    user32.EnumWindows(collect_window, 0)
+    return titles
+
+
+def zoom_meeting_window_is_visible(title_patterns: list[str]) -> tuple[bool, str]:
+    patterns = [pattern.casefold() for pattern in title_patterns if pattern.strip()]
+    if not patterns:
+        return False, ""
+
+    for title in _visible_zoom_window_titles():
+        folded_title = title.casefold()
+        if any(pattern in folded_title for pattern in patterns):
+            return True, title
+    return False, ""
+
+
+async def drain_playback_before_close(bridge: AudioBridge, timeout_seconds: float) -> None:
+    timeout_seconds = max(0.0, float(timeout_seconds))
+    if timeout_seconds <= 0:
+        return
+    deadline = time.monotonic() + timeout_seconds
+    announced = False
+    while not bridge.playback_is_drained() and time.monotonic() < deadline:
+        if not announced:
+            pending_ms = bridge.playback_pending_samples() / max(1, bridge.device_rate * bridge.device_channels) * 1000
+            print(f"Draining translated playback ({pending_ms:.0f} ms queued)...", flush=True)
+            announced = True
+        await asyncio.sleep(0.05)
+    if announced:
+        pending_ms = bridge.playback_pending_samples() / max(1, bridge.device_rate * bridge.device_channels) * 1000
+        if pending_ms > 0:
+            print(f"Playback drain timeout; {pending_ms:.0f} ms may remain queued.", flush=True)
+        else:
+            print("Translated playback drained.", flush=True)
+
+
+async def monitor_zoom_meeting_window(
+    bridge: AudioBridge,
+    title_patterns: list[str],
+    check_seconds: float,
+    end_grace_seconds: float,
+) -> None:
+    if sys.platform != "win32":
+        print("Zoom meeting-end monitor is only available on Windows.", flush=True)
+        await asyncio.to_thread(bridge.stop_event.wait)
+        return
+
+    check_seconds = max(0.5, float(check_seconds))
+    end_grace_seconds = max(check_seconds, float(end_grace_seconds))
+    seen_meeting = False
+    missing_since: Optional[float] = None
+    print(
+        "Watching for Zoom meeting window to close "
+        f"(grace {end_grace_seconds:.0f}s).",
+        flush=True,
+    )
+
+    while not bridge.stop_event.is_set():
+        visible, title = zoom_meeting_window_is_visible(title_patterns)
+        now = time.monotonic()
+
+        if visible:
+            if not seen_meeting:
+                print(f"Detected Zoom meeting window: {title}", flush=True)
+            seen_meeting = True
+            missing_since = None
+        elif seen_meeting:
+            if missing_since is None:
+                missing_since = now
+            elif now - missing_since >= end_grace_seconds:
+                print("Zoom meeting window closed; stopping bridge.", flush=True)
+                bridge.request_stop("meeting-ended")
+                return
+
+        await asyncio.sleep(check_seconds)
 
 
 async def run(args) -> None:
@@ -1546,8 +2048,8 @@ async def run(args) -> None:
                 timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
                 api_output_recorder = WavDebugRecorder(
                     Path("debug") / f"palabra_output_api_{timestamp}.wav",
-                    args.api_rate,
-                    args.channels,
+                    PALABRA_OUTPUT_RATE,
+                    PALABRA_OUTPUT_CHANNELS,
                 ).__enter__()
                 device_output_recorder = WavDebugRecorder(
                     Path("debug") / f"zoom_mic_output_{timestamp}.wav",
@@ -1585,14 +2087,22 @@ async def run(args) -> None:
                     ),
                     only_confirm_by_silence=args.only_confirm_by_silence,
                     sentence_splitter_enabled=args.sentence_splitter_enabled,
+                    translate_partial_transcriptions=args.palabra_translate_partials,
                     desired_queue_level_ms=args.palabra_desired_queue_level_ms,
                     max_queue_level_ms=args.palabra_max_queue_level_ms,
                     auto_tempo=args.palabra_auto_tempo,
                     min_tempo=args.palabra_min_tempo,
                     max_tempo=args.palabra_max_tempo,
                 )
-                print("Waiting for Palabra task to start...")
-                await asyncio.sleep(args.startup_delay)
+                print("Waiting for Palabra task readiness...")
+                await wait_for_current_task(
+                    websocket,
+                    poll_seconds=args.task_poll_seconds,
+                    timeout_seconds=args.task_ready_timeout,
+                )
+                if args.startup_delay > 0:
+                    print(f"Waiting {args.startup_delay:.1f}s after Palabra task readiness...")
+                    await asyncio.sleep(args.startup_delay)
                 drained_blocks = bridge.drain_capture_queue()
                 if drained_blocks:
                     print(
@@ -1600,12 +2110,9 @@ async def run(args) -> None:
                         flush=True,
                     )
 
-                loop = asyncio.get_running_loop()
-
                 def stop_now(*_):
                     print("Stopping bridge...", flush=True)
-                    bridge.stop_event.set()
-                    loop.create_task(websocket.close())
+                    bridge.request_stop("manual")
 
                 signal.signal(signal.SIGINT, stop_now)
                 signal.signal(signal.SIGTERM, stop_now)
@@ -1621,25 +2128,59 @@ async def run(args) -> None:
                     )
                 )
                 stop_task = asyncio.create_task(asyncio.to_thread(bridge.stop_event.wait))
+                monitor_task: Optional[asyncio.Task] = None
+                if args.end_when_zoom_meeting_ends:
+                    monitor_task = asyncio.create_task(
+                        monitor_zoom_meeting_window(
+                            bridge,
+                            args.zoom_meeting_title_patterns,
+                            args.zoom_meeting_check_seconds,
+                            args.zoom_meeting_end_grace_seconds,
+                        )
+                    )
+                tasks = {send_task, receive_task, stop_task}
+                if monitor_task is not None:
+                    tasks.add(monitor_task)
                 try:
                     done, pending = await asyncio.wait(
-                        {send_task, receive_task, stop_task},
+                        tasks,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
-                    if stop_task in done:
-                        await websocket.close()
+                    if stop_task in done or (monitor_task in done and bridge.stop_event.is_set()):
+                        if bridge.stop_reason == "meeting-ended":
+                            await websocket.close()
+                        else:
+                            if not send_task.done():
+                                send_done, _ = await asyncio.wait(
+                                    {send_task},
+                                    timeout=min(2.0, args.graceful_shutdown_timeout),
+                                )
+                                if send_task not in send_done:
+                                    send_task.cancel()
+                                    await asyncio.gather(send_task, return_exceptions=True)
+                            await graceful_stop_palabra_task(
+                                websocket,
+                                receive_task,
+                                eos_timeout_seconds=args.end_task_eos_timeout,
+                                shutdown_timeout_seconds=args.graceful_shutdown_timeout,
+                            )
+                            await websocket.close()
                     for task in pending:
                         task.cancel()
                     await asyncio.gather(*pending, return_exceptions=True)
                     for task in done:
-                        if task is not stop_task and not bridge.stop_event.is_set():
+                        if task is stop_task:
+                            continue
+                        if task is monitor_task:
+                            task.result()
+                        elif not bridge.stop_event.is_set():
                             task.result()
                 finally:
                     bridge.stop_event.set()
-                    for task in (send_task, receive_task, stop_task):
+                    for task in tasks:
                         if not task.done():
                             task.cancel()
-                    await asyncio.gather(send_task, receive_task, stop_task, return_exceptions=True)
+                    await asyncio.gather(*tasks, return_exceptions=True)
                     print("Bridge stopped.", flush=True)
         finally:
             if session_id:
@@ -1647,6 +2188,8 @@ async def run(args) -> None:
     finally:
         if bridge is not None:
             bridge.stop_event.set()
+            if bridge.stop_reason != "meeting-ended":
+                await drain_playback_before_close(bridge, args.playback_drain_timeout)
         if playback_stream is not None:
             with contextlib.suppress(Exception):
                 playback_stream.stop()
@@ -1679,6 +2222,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Bridge Zoom audio through Palabra and play interpreted audio into Zoom."
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {APP_VERSION}")
     parser.add_argument("--list-devices", action="store_true", help="Print audio devices and exit.")
     parser.add_argument(
         "--check-devices",
@@ -1690,7 +2234,7 @@ def parse_args():
     parser.add_argument(
         "--no-refresh-devices",
         action="store_true",
-        help="Skip automatic VB-Cable pair detection and config.toml updates.",
+        help="Use configured/manual audio devices as-is; skip automatic VB-Cable pair detection for this run.",
     )
     parser.add_argument(
         "--test-seconds",
@@ -1752,6 +2296,50 @@ def parse_args():
             aliases=("microphone_device",),
         ),
         help="Zoom microphone device id/name substring. Used when output_device is not set.",
+    )
+    parser.add_argument(
+        "--end-when-zoom-meeting-ends",
+        action=argparse.BooleanOptionalAction,
+        default=config_bool(
+            zoom,
+            "end_bridge_when_meeting_ends",
+            DEFAULT_END_WHEN_ZOOM_MEETING_ENDS,
+            "zoom.end_bridge_when_meeting_ends",
+        ),
+        help="Stop the bridge after the Zoom meeting/webinar window closes.",
+    )
+    parser.add_argument(
+        "--zoom-meeting-title-patterns",
+        nargs="+",
+        default=config_string_list(
+            zoom,
+            "meeting_title_patterns",
+            DEFAULT_ZOOM_MEETING_TITLE_PATTERNS,
+            "zoom.meeting_title_patterns",
+        ),
+        help="Window title substrings that identify an active Zoom meeting/webinar.",
+    )
+    parser.add_argument(
+        "--zoom-meeting-check-seconds",
+        type=float,
+        default=config_float(
+            zoom,
+            "meeting_check_seconds",
+            DEFAULT_ZOOM_MEETING_CHECK_SECONDS,
+            "zoom.meeting_check_seconds",
+        ),
+        help="Seconds between Zoom meeting window checks.",
+    )
+    parser.add_argument(
+        "--zoom-meeting-end-grace-seconds",
+        type=float,
+        default=config_float(
+            zoom,
+            "meeting_end_grace_seconds",
+            DEFAULT_ZOOM_MEETING_END_GRACE_SECONDS,
+            "zoom.meeting_end_grace_seconds",
+        ),
+        help="Seconds to wait after the Zoom meeting window disappears before stopping.",
     )
     parser.add_argument(
         "--source-language",
@@ -1839,6 +2427,18 @@ def parse_args():
         help="PortAudio callback block size. Overrides config.toml.",
     )
     parser.add_argument(
+        "--raw",
+        action=argparse.BooleanOptionalAction,
+        dest="raw_palabra_playback",
+        default=config_bool(
+            bridge,
+            "raw_palabra_playback",
+            DEFAULT_RAW_PALABRA_PLAYBACK,
+            "bridge.raw_palabra_playback",
+        ),
+        help="Diagnostic mode: play converted Palabra audio chunks directly, bypassing phrase buffering and catch-up.",
+    )
+    parser.add_argument(
         "--playback-buffer-ms",
         type=int,
         default=config_int(
@@ -1848,6 +2448,17 @@ def parse_args():
             "bridge.playback_buffer_ms",
         ),
         help="Translated audio buffer before playback starts. Overrides config.toml.",
+    )
+    parser.add_argument(
+        "--phrase-start-buffer-ms",
+        type=int,
+        default=config_int(
+            bridge,
+            "phrase_start_buffer_ms",
+            DEFAULT_PHRASE_START_BUFFER_MS,
+            "bridge.phrase_start_buffer_ms",
+        ),
+        help="Audio to collect for a phrase before releasing partial Palabra output. Overrides config.toml.",
     )
     parser.add_argument(
         "--playback-fade-ms",
@@ -1916,6 +2527,17 @@ def parse_args():
         help="Force Palabra to confirm phrase boundaries only after detected silence.",
     )
     parser.add_argument(
+        "--palabra-translate-partials",
+        action=argparse.BooleanOptionalAction,
+        default=config_bool(
+            palabra,
+            "translate_partial_transcriptions",
+            DEFAULT_PALABRA_TRANSLATE_PARTIALS,
+            "palabra.translate_partial_transcriptions",
+        ),
+        help="Let Palabra translate partial transcriptions so long phrases start speaking earlier.",
+    )
+    parser.add_argument(
         "--palabra-desired-queue-level-ms",
         type=int,
         default=config_int(
@@ -1974,10 +2596,66 @@ def parse_args():
         "--startup-delay",
         type=float,
         default=config_float(bridge, "startup_delay", DEFAULT_STARTUP_DELAY, "bridge.startup_delay"),
-        help="Seconds to wait after set_task. Overrides config.toml.",
+        help="Extra seconds to wait after Palabra reports task readiness. Overrides config.toml.",
+    )
+    parser.add_argument(
+        "--task-ready-timeout",
+        type=float,
+        default=config_float(
+            bridge,
+            "task_ready_timeout_seconds",
+            DEFAULT_TASK_READY_TIMEOUT_SECONDS,
+            "bridge.task_ready_timeout_seconds",
+        ),
+        help="Seconds to wait for Palabra current_task after set_task.",
+    )
+    parser.add_argument(
+        "--task-poll-seconds",
+        type=float,
+        default=config_float(
+            bridge,
+            "task_poll_seconds",
+            DEFAULT_TASK_POLL_SECONDS,
+            "bridge.task_poll_seconds",
+        ),
+        help="Seconds between Palabra get_task readiness polls, capped at 2 seconds.",
+    )
+    parser.add_argument(
+        "--end-task-eos-timeout",
+        type=float,
+        default=config_float(
+            bridge,
+            "end_task_eos_timeout_seconds",
+            DEFAULT_END_TASK_EOS_TIMEOUT_SECONDS,
+            "bridge.end_task_eos_timeout_seconds",
+        ),
+        help="Palabra eos_timeout sent with end_task during graceful manual stops.",
+    )
+    parser.add_argument(
+        "--graceful-shutdown-timeout",
+        type=float,
+        default=config_float(
+            bridge,
+            "graceful_shutdown_timeout_seconds",
+            DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS,
+            "bridge.graceful_shutdown_timeout_seconds",
+        ),
+        help="Maximum seconds to wait for Palabra EOS after a graceful manual stop.",
+    )
+    parser.add_argument(
+        "--playback-drain-timeout",
+        type=float,
+        default=config_float(
+            bridge,
+            "playback_drain_timeout_seconds",
+            DEFAULT_PLAYBACK_DRAIN_TIMEOUT_SECONDS,
+            "bridge.playback_drain_timeout_seconds",
+        ),
+        help="Maximum seconds to keep the output stream open while translated audio drains.",
     )
     args = parser.parse_args()
     args.hostapi_preference = remove_blocked_hostapis(args.hostapi_preference)
+    validate_runtime_args(args)
     return args
 
 
