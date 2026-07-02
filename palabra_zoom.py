@@ -15,7 +15,7 @@ from typing import Optional
 import sounddevice as sd
 from dotenv import load_dotenv
 
-from config import (
+from modules.config import (
     config_bool,
     config_bool_with_aliases,
     config_device_selector,
@@ -31,25 +31,25 @@ from config import (
     resolve_translation_settings,
     validate_runtime_args,
 )
-from constants import *
-from debug_recording import (
+from modules.constants import *
+from modules.debug_recording import (
     AsyncWavDebugRecorder,
     DebugTextLogger,
     WavDebugRecorder,
     convert_debug_wavs_to_mp3,
     require_ffmpeg_for_debug_mp3,
 )
-from logging_utils import LAST_ERROR_LOG_PATH, write_last_error_log
-from palabra_agent import PalabraAgent, PalabraAgentSettings
-from palabra_client import (
+from modules.logging_utils import LAST_ERROR_LOG_PATH, write_last_error_log
+from modules.palabra_agent import PalabraAgent, PalabraAgentSettings
+from modules.palabra_client import (
     connect_websocket,
     create_session,
     delete_session,
     language_label,
     wait_for_current_task,
 )
-from system_power import keep_windows_awake, restore_windows_power_state
-from transports.cable import (
+from modules.system_power import keep_windows_awake, restore_windows_power_state
+from modules.transports.cable import (
     AudioBridge,
     check_devices,
     drain_playback_before_close,
@@ -58,7 +58,7 @@ from transports.cable import (
     start_audio_with_fallback,
     test_output,
 )
-from zoom_desktop import monitor_zoom_meeting_window
+from modules.zoom_desktop import monitor_zoom_meeting_window
 
 async def run(args) -> None:
     load_dotenv()

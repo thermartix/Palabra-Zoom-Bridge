@@ -5,7 +5,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from constants import CABLE_ROUTE_LOG_PATH, LAST_ERROR_LOG_PATH, LOG_DIR
+from modules.constants import CABLE_ROUTE_LOG_PATH, LAST_ERROR_LOG_PATH, LOG_DIR
 
 def log_timestamp() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")

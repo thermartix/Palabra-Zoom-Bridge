@@ -17,11 +17,11 @@ import numpy as np
 import sounddevice as sd
 from scipy.signal import resample_poly
 
-from audio_utils import PlaybackChunk, convert_channels_int16, resample_int16, stream_blocksize
-from constants import *
-from debug_recording import AsyncWavDebugRecorder, DebugTextLogger, WavDebugRecorder
-from logging_utils import append_cable_route_log, portaudio_error_lines
-from palabra_client import (
+from modules.audio_utils import PlaybackChunk, convert_channels_int16, resample_int16, stream_blocksize
+from modules.constants import *
+from modules.debug_recording import AsyncWavDebugRecorder, DebugTextLogger, WavDebugRecorder
+from modules.logging_utils import append_cable_route_log, portaudio_error_lines
+from modules.palabra_client import (
     PalabraRuntimeError,
     audio_group_key,
     compact_palabra_ids,

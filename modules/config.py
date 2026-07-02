@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Optional
 import tomllib
 
-from constants import *
+from modules.constants import *
 
 def validate_runtime_args(args) -> None:
     if args.api_rate < 16000 or args.api_rate > 48000:

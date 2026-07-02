@@ -13,7 +13,7 @@ from typing import Optional
 
 import numpy as np
 
-from logging_utils import log_timestamp
+from modules.logging_utils import log_timestamp
 
 class WavDebugRecorder:
     def __init__(self, path: Path, sample_rate: int, channels: int) -> None:

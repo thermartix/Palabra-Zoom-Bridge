@@ -4,7 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Optional
 
-from palabra_client import configure_translation, graceful_stop_palabra_task
+from modules.palabra_client import configure_translation, graceful_stop_palabra_task
 
 
 @dataclass(frozen=True)

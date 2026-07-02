@@ -9,7 +9,7 @@ from urllib.parse import quote
 import httpx
 import websockets
 
-from constants import (
+from modules.constants import (
     LANGUAGE_NAMES,
     PALABRA_OUTPUT_CHANNELS,
     PALABRA_OUTPUT_RATE,

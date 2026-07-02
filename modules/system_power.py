@@ -3,7 +3,7 @@ from __future__ import annotations
 import ctypes
 import os
 
-from constants import ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED
+from modules.constants import ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED
 
 def keep_windows_awake() -> bool:
     if os.name != "nt":

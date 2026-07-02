@@ -1,6 +1,6 @@
 # Palabra Zoom Bridge
 
-Version: 0.3.20
+Version: 0.3.21
 
 Local MVP bridge for one Zoom interpretation channel:
 
@@ -225,14 +225,15 @@ The bridge is split into small modules so the current virtual-cable mode can sta
 as a fallback while SDK-based multilang support is added:
 
 - `palabra_zoom.py` is the CLI entrypoint and lifecycle orchestrator.
-- `palabra_client.py` owns Palabra session, websocket, task, and message helpers.
-- `palabra_agent.py` models one Palabra worker for one target language. The
+- `modules/palabra_client.py` owns Palabra session, websocket, task, and message helpers.
+- `modules/palabra_agent.py` models one Palabra worker for one target language. The
   current cable mode creates one agent; multilang mode can create one per target.
-- `transports/cable.py` contains the existing VB-Cable audio path and diagnostics.
-- `transports/base.py` defines the minimal transport shape for cable and future
+- `modules/transports/cable.py` contains the existing VB-Cable audio path and diagnostics.
+- `modules/transports/base.py` defines the minimal transport shape for cable and future
   Zoom SDK transports.
-- `audio_utils.py`, `debug_recording.py`, `config.py`, `zoom_desktop.py`, and
-  `system_power.py` hold shared helpers that used to live in the entrypoint.
+- `modules/audio_utils.py`, `modules/debug_recording.py`, `modules/config.py`,
+  `modules/zoom_desktop.py`, and `modules/system_power.py` hold shared helpers
+  that used to live in the entrypoint.
 
-Phase II should add a `transports/zoom_sdk.py` implementation, then have the
+Phase II should flesh out the `modules/transports/zoom_sdk.py` implementation, then have the
 orchestrator select either the cable transport or the SDK transport from config.
