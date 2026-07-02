@@ -1,6 +1,6 @@
 # Palabra Zoom Bridge
 
-Version: 0.3.24
+Version: 0.3.25
 
 Local MVP bridge for one Zoom interpretation channel:
 
@@ -302,3 +302,17 @@ The native process should write one JSON object per stdout line:
 ```
 
 `pcm_s16le_base64` is base64-encoded signed 16-bit little-endian PCM.
+
+A C# helper project lives in `native/ZoomSdkProbe`. It currently has a working
+`--simulate` mode for end-to-end process-adapter testing, plus a real SDK stub.
+Build it with Visual Studio Build Tools:
+
+```powershell
+& "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Current\Bin\MSBuild.exe" native\ZoomSdkProbe\ZoomSdkProbe.csproj /p:Configuration=Release
+```
+
+Then test the Python process adapter through the helper simulator:
+
+```powershell
+& "C:\Users\marti\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --mode sdk-probe --zoom-sdk-meeting-number 123456789 --zoom-sdk-probe-seconds 1 --zoom-sdk-adapter-module modules.zoom_sdk_process_adapter --zoom-sdk-adapter-command native\ZoomSdkProbe\bin\Release\ZoomSdkProbe.exe --zoom-sdk-adapter-args --simulate
+```

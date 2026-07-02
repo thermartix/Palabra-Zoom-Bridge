@@ -470,14 +470,14 @@ def parse_args():
     )
     parser.add_argument(
         "--zoom-sdk-adapter-args",
-        nargs="*",
+        nargs=argparse.REMAINDER,
         default=config_string_list_allow_empty(
             zoom_sdk,
             "adapter_args",
             DEFAULT_ZOOM_SDK_ADAPTER_ARGS,
             "zoom_sdk.adapter_args",
         ),
-        help="Arguments passed to the external native SDK probe executable.",
+        help="Arguments passed to the external native SDK probe executable. Place this option last.",
     )
     parser.add_argument(
         "--zoom-sdk-dry-run",

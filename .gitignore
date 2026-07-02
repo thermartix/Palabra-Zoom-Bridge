@@ -31,6 +31,10 @@ debug/
 logs/
 *.log
 
+# Native helper build output
+native/ZoomSdkProbe/bin/
+native/ZoomSdkProbe/obj/
+
 # OS and editor metadata
 .DS_Store
 Thumbs.db

@@ -75,8 +75,8 @@ channels = 1
 adapter_module = ""
 # To use the built-in process adapter, set:
 # adapter_module = "modules.zoom_sdk_process_adapter"
-# adapter_command = "path/to/native_zoom_sdk_probe.exe"
-# adapter_args = []
+# adapter_command = "native/ZoomSdkProbe/bin/Release/ZoomSdkProbe.exe"
+# adapter_args = ["--simulate"]
 adapter_command = ""
 adapter_args = []
 dry_run = false
