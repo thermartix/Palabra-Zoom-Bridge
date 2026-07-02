@@ -1,6 +1,6 @@
 # Palabra Zoom Bridge
 
-Version: 0.3.22
+Version: 0.3.23
 
 Local MVP bridge for one Zoom interpretation channel:
 
@@ -23,7 +23,11 @@ Copy `.env.example` to `.env` and fill in:
 ```text
 PALABRA_CLIENT_ID=...
 PALABRA_CLIENT_SECRET=...
+ZOOM_SDK_CLIENT_ID=...
+ZOOM_SDK_CLIENT_SECRET=...
 ```
+
+The Zoom SDK values are used only by `sdk-probe` mode and must stay local.
 
 ## 3. Configure bridge defaults
 
@@ -270,5 +274,7 @@ channels = 1
 
 The adapter module must expose either `run_probe(settings, audio_callback)` or
 `create_adapter(settings, audio_callback).run_probe()`. The callback receives
-`pcm_s16le` bytes plus sample rate and channel count. Once this probe records
-clean meeting audio, the next step is wiring that source into one `PalabraAgent`.
+`pcm_s16le` bytes plus sample rate and channel count. The generated Meeting SDK
+JWT is available to the adapter as `settings.auth_token`; do not log or print it.
+Once this probe records clean meeting audio, the next step is wiring that source
+into one `PalabraAgent`.

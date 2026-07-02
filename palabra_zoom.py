@@ -60,8 +60,23 @@ from modules.transports.cable import (
 )
 from modules.transports.zoom_sdk import ZoomSdkProbeSettings, ZoomSdkTransport
 from modules.zoom_desktop import monitor_zoom_meeting_window
+from modules.zoom_sdk_auth import create_meeting_sdk_jwt
 
 async def run_sdk_probe(args) -> None:
+    load_dotenv()
+    auth_token = ""
+    if not args.zoom_sdk_dry_run:
+        client_id = os.getenv("ZOOM_SDK_CLIENT_ID")
+        client_secret = os.getenv("ZOOM_SDK_CLIENT_SECRET")
+        if not client_id or not client_secret:
+            raise SystemExit("Set ZOOM_SDK_CLIENT_ID and ZOOM_SDK_CLIENT_SECRET in .env or the environment.")
+        auth_token = create_meeting_sdk_jwt(
+            client_id,
+            client_secret,
+            args.zoom_sdk_meeting_number,
+            role=0,
+        )
+
     settings = ZoomSdkProbeSettings(
         meeting_number=args.zoom_sdk_meeting_number,
         password=args.zoom_sdk_password,
@@ -72,6 +87,7 @@ async def run_sdk_probe(args) -> None:
         channels=args.zoom_sdk_channels,
         adapter_module=args.zoom_sdk_adapter_module,
         dry_run=args.zoom_sdk_dry_run,
+        auth_token=auth_token,
     )
     print("Running Zoom SDK audio probe.")
     if settings.dry_run:

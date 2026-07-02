@@ -25,6 +25,7 @@ class ZoomSdkProbeSettings:
     channels: int
     adapter_module: str
     dry_run: bool
+    auth_token: str = ""
 
 
 class ZoomSdkProbeRecorder:
@@ -106,7 +107,8 @@ class ZoomSdkTransport:
             raise SystemExit(
                 "zoom_sdk.adapter_module is not configured. "
                 "Set it to a Python module that wraps the Zoom Meeting SDK raw audio callbacks, "
-                "or run --zoom-sdk-dry-run to test the probe recorder without the SDK."
+                "or run --zoom-sdk-dry-run to test the probe recorder without the SDK. "
+                "The adapter receives the Meeting SDK JWT as settings.auth_token."
             )
 
         try:
