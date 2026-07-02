@@ -5,9 +5,10 @@ Small C++ helper for loading the installed Zoom Meeting SDK for Windows.
 Current state:
 
 - `--sdk-info` loads `sdk.dll` and prints the SDK version.
-- `--sdk-init` loads `sdk.dll`, calls `InitSDK`, then calls `CleanUPSDK`.
-  This is experimental; the first local run loaded the SDK but did not return
-  from `InitSDK`.
+- `--sdk-init` starts a guarded child process, loads `sdk.dll`, and calls
+  `InitSDK`. This is verified with Zoom Meeting SDK `7.1.0 (41845)`. The child
+  skips immediate cleanup because `CleanUPSDK` currently does not return
+  reliably in this smoke-test shape.
 - Meeting join, raw audio subscription, and interpreter/talkback output are the
   next steps.
 
@@ -21,6 +22,7 @@ Test directly:
 
 ```powershell
 & native\ZoomSdkNativeProbe\bin\x64\Release\ZoomSdkNativeProbe.exe --sdk-info --sdk-root C:\dev\zoom-sdk-windows
+& native\ZoomSdkNativeProbe\bin\x64\Release\ZoomSdkNativeProbe.exe --sdk-init --sdk-root C:\dev\zoom-sdk-windows --timeout 8
 ```
 
 Test through Python:

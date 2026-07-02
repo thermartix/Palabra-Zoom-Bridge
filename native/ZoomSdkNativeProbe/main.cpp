@@ -1,9 +1,11 @@
 #include <windows.h>
 
+#include <atomic>
 #include <cstdlib>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "zoom_sdk.h"
@@ -12,6 +14,7 @@ namespace {
 
 using ZOOM_SDK_NAMESPACE::CleanUPSDK;
 using ZOOM_SDK_NAMESPACE::InitParam;
+using ZOOM_SDK_NAMESPACE::LANGUAGE_English;
 using ZOOM_SDK_NAMESPACE::SDKERR_SUCCESS;
 using ZOOM_SDK_NAMESPACE::SDKError;
 using ZOOM_SDK_NAMESPACE::ZoomSDKRawDataMemoryModeHeap;
@@ -46,6 +49,7 @@ std::string JsonEscape(const std::string& value) {
 void WriteMessage(const char* type, const std::string& message) {
     std::cout << "{\"type\":\"" << type << "\",\"message\":\""
               << JsonEscape(message) << "\"}" << std::endl;
+    std::cout.flush();
 }
 
 void WriteStatus(const std::string& message) {
@@ -58,6 +62,7 @@ void WriteError(const std::string& message) {
 
 void WriteDone() {
     std::cout << "{\"type\":\"done\"}" << std::endl;
+    std::cout.flush();
 }
 
 std::wstring Utf8ToWide(const std::string& value) {
@@ -124,6 +129,19 @@ std::wstring ArgValue(const std::vector<std::wstring>& args, const wchar_t* name
     return L"";
 }
 
+std::wstring QuoteArg(const std::wstring& value) {
+    std::wstring quoted = L"\"";
+    for (wchar_t ch : value) {
+        if (ch == L'"') {
+            quoted += L"\\\"";
+        } else {
+            quoted += ch;
+        }
+    }
+    quoted += L"\"";
+    return quoted;
+}
+
 bool HasArg(const std::vector<std::wstring>& args, const wchar_t* name) {
     for (const std::wstring& arg : args) {
         if (arg == name) {
@@ -131,6 +149,19 @@ bool HasArg(const std::vector<std::wstring>& args, const wchar_t* name) {
         }
     }
     return false;
+}
+
+int ArgIntValue(const std::vector<std::wstring>& args, const wchar_t* name, int fallback) {
+    std::wstring raw = ArgValue(args, name);
+    if (raw.empty()) {
+        return fallback;
+    }
+    wchar_t* end = nullptr;
+    long value = std::wcstol(raw.c_str(), &end, 10);
+    if (end == raw.c_str() || value <= 0 || value > 3600) {
+        return fallback;
+    }
+    return static_cast<int>(value);
 }
 
 std::wstring ResolveSdkRoot(const std::vector<std::wstring>& args) {
@@ -195,9 +226,84 @@ int PrintHelp() {
         << "  --sdk-info          Load sdk.dll and print the SDK version.\n"
         << "  --sdk-init          Load sdk.dll and call InitSDK/CleanUPSDK.\n"
         << "  --sdk-root PATH     SDK root, e.g. C:\\dev\\zoom-sdk-windows.\n"
+        << "  --timeout SECONDS   SDK call timeout for probe modes. Default: 30.\n"
         << "\n"
         << "The SDK root can also come from ZOOM_MEETING_SDK_ROOT.\n";
     return 0;
+}
+
+int RunInitWithWatchdog(const std::vector<std::wstring>& args) {
+    wchar_t exePath[MAX_PATH] = {0};
+    DWORD pathLen = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    if (pathLen == 0 || pathLen >= MAX_PATH) {
+        WriteError("Could not resolve helper executable path.");
+        return 2;
+    }
+
+    std::wstring root = ResolveSdkRoot(args);
+    int timeoutSeconds = ArgIntValue(args, L"--timeout", 30);
+    std::wstring commandLine = QuoteArg(exePath) + L" --sdk-init-child";
+    if (!root.empty()) {
+        commandLine += L" --sdk-root " + QuoteArg(root);
+    }
+    commandLine += L" --skip-cleanup";
+
+    STARTUPINFOW startupInfo = {};
+    startupInfo.cb = sizeof(startupInfo);
+    PROCESS_INFORMATION processInfo = {};
+    std::vector<wchar_t> mutableCommand(commandLine.begin(), commandLine.end());
+    mutableCommand.push_back(L'\0');
+
+    WriteStatus("starting InitSDK child probe");
+    BOOL created = CreateProcessW(
+        nullptr,
+        mutableCommand.data(),
+        nullptr,
+        nullptr,
+        TRUE,
+        0,
+        nullptr,
+        nullptr,
+        &startupInfo,
+        &processInfo);
+
+    if (!created) {
+        WriteError("CreateProcess failed with Windows error " + std::to_string(GetLastError()) + ".");
+        return 2;
+    }
+
+    DWORD waitResult = WaitForSingleObject(processInfo.hProcess, static_cast<DWORD>(timeoutSeconds) * 1000);
+    if (waitResult == WAIT_TIMEOUT) {
+        TerminateProcess(processInfo.hProcess, 3);
+        WaitForSingleObject(processInfo.hProcess, 5000);
+        CloseHandle(processInfo.hThread);
+        CloseHandle(processInfo.hProcess);
+        WriteError("InitSDK child probe did not exit within " + std::to_string(timeoutSeconds) + " seconds.");
+        return 3;
+    }
+
+    DWORD exitCode = 1;
+    GetExitCodeProcess(processInfo.hProcess, &exitCode);
+    CloseHandle(processInfo.hThread);
+    CloseHandle(processInfo.hProcess);
+    return static_cast<int>(exitCode);
+}
+
+bool WaitForFlag(const std::atomic<bool>& done, int timeoutSeconds) {
+    DWORD start = GetTickCount();
+    DWORD timeoutMs = static_cast<DWORD>(timeoutSeconds) * 1000;
+    MSG msg;
+    while (!done.load()) {
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        if (GetTickCount() - start > timeoutMs) {
+            return false;
+        }
+        Sleep(10);
+    }
+    return true;
 }
 
 int RunSdkProbe(const std::vector<std::wstring>& args, bool initialize) {
@@ -241,14 +347,37 @@ int RunSdkProbe(const std::vector<std::wstring>& args, bool initialize) {
         InitParam initParam;
         initParam.strWebDomain = L"https://zoom.us";
         initParam.strSupportUrl = L"https://zoom.us";
+        initParam.emLanguageID = LANGUAGE_English;
+        initParam.hResInstance = GetModuleHandleW(nullptr);
         initParam.enableLogByDefault = true;
+        initParam.enableGenerateDump = true;
         initParam.rawdataOpts.audioRawdataMemoryMode = ZoomSDKRawDataMemoryModeHeap;
-        SDKError initResult = initSdk(initParam);
+
+        std::atomic<bool> initDone(false);
+        SDKError initResult = ZOOM_SDK_NAMESPACE::SDKERR_UNKNOWN;
+        WriteStatus("calling InitSDK");
+        std::thread initThread([&]() {
+            initResult = initSdk(initParam);
+            initDone.store(true);
+        });
+
+        int timeoutSeconds = ArgIntValue(args, L"--timeout", 30);
+        if (!WaitForFlag(initDone, timeoutSeconds)) {
+            initThread.detach();
+            WriteError("InitSDK did not return within " + std::to_string(timeoutSeconds) + " seconds.");
+            ExitProcess(3);
+        }
+        initThread.join();
+
         if (initResult != SDKERR_SUCCESS) {
             WriteError("InitSDK failed with SDKError " + std::to_string(static_cast<int>(initResult)) + ".");
             return 2;
         }
         WriteStatus("InitSDK succeeded");
+        if (HasArg(args, L"--skip-cleanup")) {
+            WriteDone();
+            ExitProcess(0);
+        }
         cleanupSdk();
         WriteStatus("CleanUPSDK completed");
     }
@@ -269,9 +398,16 @@ int wmain(int argc, wchar_t* argv[]) {
         return PrintHelp();
     }
 
-    bool initialize = HasArg(args, L"--sdk-init");
-    if (initialize || HasArg(args, L"--sdk-info") || args.empty()) {
-        return RunSdkProbe(args, initialize);
+    if (HasArg(args, L"--sdk-init")) {
+        return RunInitWithWatchdog(args);
+    }
+
+    if (HasArg(args, L"--sdk-init-child")) {
+        return RunSdkProbe(args, true);
+    }
+
+    if (HasArg(args, L"--sdk-info") || args.empty()) {
+        return RunSdkProbe(args, false);
     }
 
     WriteError("Unknown mode. Use --sdk-info, --sdk-init, or --help.");

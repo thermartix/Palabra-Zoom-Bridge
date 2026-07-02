@@ -1,6 +1,6 @@
 # Palabra Zoom Bridge
 
-Version: 0.3.26
+Version: 0.3.27
 
 Local MVP bridge for one Zoom interpretation channel:
 
@@ -342,7 +342,8 @@ Or through the Python process adapter:
 & "C:\Users\marti\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --mode sdk-probe --zoom-sdk-meeting-number 123456789 --zoom-sdk-probe-seconds 1 --zoom-sdk-root C:\dev\zoom-sdk-windows --zoom-sdk-adapter-module modules.zoom_sdk_process_adapter --zoom-sdk-adapter-command native\ZoomSdkNativeProbe\bin\x64\Release\ZoomSdkNativeProbe.exe --zoom-sdk-adapter-args --sdk-info
 ```
 
-`--sdk-init` is intentionally still experimental. On the first local test, SDK
-loading succeeded and reported version `7.1.0 (41845)`, but `InitSDK` did not
-return. The next SDK step is to compare the helper's initialization settings
-with Zoom's demo app, especially around message-pump and UI initialization.
+`--sdk-init` runs SDK initialization in a guarded child process. It has been
+verified locally with Zoom Meeting SDK `7.1.0 (41845)`. The child skips immediate
+SDK cleanup in this smoke-test mode because `CleanUPSDK` does not return
+reliably in the short-lived probe shape. The next SDK step is authenticating the
+SDK JWT and joining a meeting.
