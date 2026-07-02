@@ -1,3 +1,7 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+
 import argparse
 import asyncio
 import base64
@@ -33,7 +37,9 @@ from scipy.signal import resample_poly
 
 SESSION_URL = "https://api.palabra.ai/session-storage/session"
 SESSIONS_URL = "https://api.palabra.ai/session-storage/sessions"
-APP_VERSION = "0.3.1"
+APP_NAME = "Palabra Zoom Bridge"
+__version__ = "0.3.2"
+APP_VERSION = __version__
 CONFIG_PATH = Path("config.toml")
 LOG_DIR = Path("logs")
 CABLE_ROUTE_LOG_PATH = LOG_DIR / "cable_route.log"
@@ -2379,7 +2385,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Bridge Zoom audio through Palabra and play interpreted audio into Zoom."
     )
-    parser.add_argument("--version", action="version", version=f"%(prog)s {APP_VERSION}")
+    parser.add_argument("--version", action="version", version=f"{APP_NAME} {APP_VERSION}")
     parser.add_argument("--list-devices", action="store_true", help="Print audio devices and exit.")
     parser.add_argument(
         "--check-devices",
