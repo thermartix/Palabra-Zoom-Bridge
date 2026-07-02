@@ -121,6 +121,18 @@ def config_string_list(
     return value
 
 
+def config_string_list_allow_empty(
+    section: dict,
+    key: str,
+    default: tuple[str, ...],
+    dotted_name: str,
+) -> list[str]:
+    value = section.get(key, list(default))
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise SystemExit(f"{dotted_name} in config.toml must be a list of strings.")
+    return value
+
+
 def remove_blocked_hostapis(hostapis: list[str]) -> list[str]:
     allowed = [hostapi for hostapi in hostapis if hostapi not in BLOCKED_HOSTAPIS]
     blocked = [hostapi for hostapi in hostapis if hostapi in BLOCKED_HOSTAPIS]

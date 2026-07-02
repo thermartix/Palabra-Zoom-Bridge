@@ -1,6 +1,6 @@
 # Palabra Zoom Bridge
 
-Version: 0.3.23
+Version: 0.3.24
 
 Local MVP bridge for one Zoom interpretation channel:
 
@@ -266,7 +266,9 @@ mode = "sdk-probe"
 meeting_number = "..."
 password = "..."
 display_name = "Palabra SDK Probe"
-adapter_module = "your_zoom_sdk_adapter"
+adapter_module = "modules.zoom_sdk_process_adapter"
+adapter_command = "path/to/native_zoom_sdk_probe.exe"
+adapter_args = []
 output_wav = "debug/zoom_sdk_probe.wav"
 sample_rate = 48000
 channels = 1
@@ -278,3 +280,25 @@ The adapter module must expose either `run_probe(settings, audio_callback)` or
 JWT is available to the adapter as `settings.auth_token`; do not log or print it.
 Once this probe records clean meeting audio, the next step is wiring that source
 into one `PalabraAgent`.
+
+The built-in `modules.zoom_sdk_process_adapter` starts an external native SDK
+probe process with the Meeting SDK JWT and meeting settings in environment
+variables:
+
+- `ZOOM_SDK_AUTH_TOKEN`
+- `ZOOM_SDK_MEETING_NUMBER`
+- `ZOOM_SDK_PASSWORD`
+- `ZOOM_SDK_DISPLAY_NAME`
+- `ZOOM_SDK_PROBE_SECONDS`
+- `ZOOM_SDK_SAMPLE_RATE`
+- `ZOOM_SDK_CHANNELS`
+
+The native process should write one JSON object per stdout line:
+
+```json
+{"type":"status","message":"joined meeting"}
+{"type":"audio","sample_rate":48000,"channels":1,"pcm_s16le_base64":"..."}
+{"type":"done"}
+```
+
+`pcm_s16le_base64` is base64-encoded signed 16-bit little-endian PCM.

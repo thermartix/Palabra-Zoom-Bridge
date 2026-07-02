@@ -24,7 +24,9 @@ class ZoomSdkProbeSettings:
     sample_rate: int
     channels: int
     adapter_module: str
+    adapter_command: str
     dry_run: bool
+    adapter_args: tuple[str, ...] = ()
     auth_token: str = ""
 
 

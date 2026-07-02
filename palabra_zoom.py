@@ -26,6 +26,7 @@ from modules.config import (
     config_section,
     config_string,
     config_string_list,
+    config_string_list_allow_empty,
     load_config,
     remove_blocked_hostapis,
     resolve_translation_settings,
@@ -86,6 +87,8 @@ async def run_sdk_probe(args) -> None:
         sample_rate=args.zoom_sdk_sample_rate,
         channels=args.zoom_sdk_channels,
         adapter_module=args.zoom_sdk_adapter_module,
+        adapter_command=args.zoom_sdk_adapter_command,
+        adapter_args=tuple(args.zoom_sdk_adapter_args),
         dry_run=args.zoom_sdk_dry_run,
         auth_token=auth_token,
     )
@@ -454,6 +457,27 @@ def parse_args():
             "zoom_sdk.adapter_module",
         ),
         help="Python module that wraps Zoom Meeting SDK raw audio callbacks.",
+    )
+    parser.add_argument(
+        "--zoom-sdk-adapter-command",
+        default=config_string(
+            zoom_sdk,
+            "adapter_command",
+            DEFAULT_ZOOM_SDK_ADAPTER_COMMAND,
+            "zoom_sdk.adapter_command",
+        ),
+        help="External native SDK probe executable used by the process adapter.",
+    )
+    parser.add_argument(
+        "--zoom-sdk-adapter-args",
+        nargs="*",
+        default=config_string_list_allow_empty(
+            zoom_sdk,
+            "adapter_args",
+            DEFAULT_ZOOM_SDK_ADAPTER_ARGS,
+            "zoom_sdk.adapter_args",
+        ),
+        help="Arguments passed to the external native SDK probe executable.",
     )
     parser.add_argument(
         "--zoom-sdk-dry-run",
