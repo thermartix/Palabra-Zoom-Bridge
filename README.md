@@ -1,6 +1,6 @@
 # Palabra Zoom Bridge
 
-Version: 0.3.21
+Version: 0.3.22
 
 Local MVP bridge for one Zoom interpretation channel:
 
@@ -237,3 +237,38 @@ as a fallback while SDK-based multilang support is added:
 
 Phase II should flesh out the `modules/transports/zoom_sdk.py` implementation, then have the
 orchestrator select either the cable transport or the SDK transport from config.
+
+## 10. Zoom SDK probe MVP
+
+The first SDK mode is `sdk-probe`. It does not start Palabra and does not change
+the virtual-cable fallback. Its purpose is to prove that a Zoom Meeting SDK raw
+audio adapter can join a meeting and deliver PCM audio into this app.
+
+Dry-run the probe recorder without Zoom:
+
+```powershell
+& "C:\Users\marti\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --mode sdk-probe --zoom-sdk-dry-run --zoom-sdk-probe-seconds 3
+```
+
+That writes a generated test tone to `debug/zoom_sdk_probe.wav`.
+
+For a real SDK probe, configure `[zoom_sdk]` in `config.toml`:
+
+```toml
+[app]
+mode = "sdk-probe"
+
+[zoom_sdk]
+meeting_number = "..."
+password = "..."
+display_name = "Palabra SDK Probe"
+adapter_module = "your_zoom_sdk_adapter"
+output_wav = "debug/zoom_sdk_probe.wav"
+sample_rate = 48000
+channels = 1
+```
+
+The adapter module must expose either `run_probe(settings, audio_callback)` or
+`create_adapter(settings, audio_callback).run_probe()`. The callback receives
+`pcm_s16le` bytes plus sample rate and channel count. Once this probe records
+clean meeting audio, the next step is wiring that source into one `PalabraAgent`.

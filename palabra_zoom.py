@@ -58,7 +58,29 @@ from modules.transports.cable import (
     start_audio_with_fallback,
     test_output,
 )
+from modules.transports.zoom_sdk import ZoomSdkProbeSettings, ZoomSdkTransport
 from modules.zoom_desktop import monitor_zoom_meeting_window
+
+async def run_sdk_probe(args) -> None:
+    settings = ZoomSdkProbeSettings(
+        meeting_number=args.zoom_sdk_meeting_number,
+        password=args.zoom_sdk_password,
+        display_name=args.zoom_sdk_display_name,
+        probe_seconds=args.zoom_sdk_probe_seconds,
+        output_wav=Path(args.zoom_sdk_output_wav),
+        sample_rate=args.zoom_sdk_sample_rate,
+        channels=args.zoom_sdk_channels,
+        adapter_module=args.zoom_sdk_adapter_module,
+        dry_run=args.zoom_sdk_dry_run,
+    )
+    print("Running Zoom SDK audio probe.")
+    if settings.dry_run:
+        print("SDK dry run is enabled; no Zoom meeting will be joined.")
+    elif not settings.meeting_number:
+        raise SystemExit("zoom_sdk.meeting_number is required for SDK probe mode.")
+    transport = ZoomSdkTransport(settings)
+    await transport.run_probe()
+
 
 async def run(args) -> None:
     load_dotenv()
@@ -278,9 +300,11 @@ async def run(args) -> None:
 
 def parse_args():
     config = load_config()
+    app = config_section(config, "app")
     translation = config_section(config, "translation")
     audio = config_section(config, "audio")
     zoom = config_section(config, "zoom")
+    zoom_sdk = config_section(config, "zoom_sdk")
     bridge = config_section(config, "bridge")
     palabra = config_section(config, "palabra")
     diagnostics = config_section(config, "diagnostics")
@@ -289,6 +313,12 @@ def parse_args():
         description="Bridge Zoom audio through Palabra and play interpreted audio into Zoom."
     )
     parser.add_argument("--version", action="version", version=f"{APP_NAME} {APP_VERSION}")
+    parser.add_argument(
+        "--mode",
+        choices=sorted(APP_MODES),
+        default=config_string(app, "mode", DEFAULT_APP_MODE, "app.mode"),
+        help="Runtime mode. Use cable for the current bridge or sdk-probe for Zoom SDK audio capture testing.",
+    )
     parser.add_argument("--list-devices", action="store_true", help="Print audio devices and exit.")
     parser.add_argument(
         "--check-devices",
@@ -333,6 +363,92 @@ def parse_args():
         "--dump-palabra-messages",
         action="store_true",
         help="Print the first payload shape for each Palabra message type without dumping audio.",
+    )
+    parser.add_argument(
+        "--zoom-sdk-meeting-number",
+        default=config_string(zoom_sdk, "meeting_number", "", "zoom_sdk.meeting_number"),
+        help="Zoom meeting number for SDK probe mode.",
+    )
+    parser.add_argument(
+        "--zoom-sdk-password",
+        default=config_string(zoom_sdk, "password", "", "zoom_sdk.password"),
+        help="Zoom meeting password for SDK probe mode.",
+    )
+    parser.add_argument(
+        "--zoom-sdk-display-name",
+        default=config_string(
+            zoom_sdk,
+            "display_name",
+            DEFAULT_ZOOM_SDK_DISPLAY_NAME,
+            "zoom_sdk.display_name",
+        ),
+        help="Display name used by the SDK probe participant.",
+    )
+    parser.add_argument(
+        "--zoom-sdk-probe-seconds",
+        type=float,
+        default=config_float(
+            zoom_sdk,
+            "probe_seconds",
+            DEFAULT_ZOOM_SDK_PROBE_SECONDS,
+            "zoom_sdk.probe_seconds",
+        ),
+        help="Seconds of SDK meeting audio to capture in sdk-probe mode.",
+    )
+    parser.add_argument(
+        "--zoom-sdk-output-wav",
+        default=config_string(
+            zoom_sdk,
+            "output_wav",
+            DEFAULT_ZOOM_SDK_OUTPUT_WAV,
+            "zoom_sdk.output_wav",
+        ),
+        help="WAV file written by sdk-probe mode.",
+    )
+    parser.add_argument(
+        "--zoom-sdk-sample-rate",
+        type=int,
+        default=config_int(
+            zoom_sdk,
+            "sample_rate",
+            DEFAULT_ZOOM_SDK_SAMPLE_RATE,
+            "zoom_sdk.sample_rate",
+        ),
+        help="Expected SDK probe PCM sample rate.",
+    )
+    parser.add_argument(
+        "--zoom-sdk-channels",
+        type=int,
+        choices=(1, 2),
+        default=config_int(
+            zoom_sdk,
+            "channels",
+            DEFAULT_ZOOM_SDK_CHANNELS,
+            "zoom_sdk.channels",
+            choices=(1, 2),
+        ),
+        help="Expected SDK probe PCM channel count.",
+    )
+    parser.add_argument(
+        "--zoom-sdk-adapter-module",
+        default=config_string(
+            zoom_sdk,
+            "adapter_module",
+            DEFAULT_ZOOM_SDK_ADAPTER_MODULE,
+            "zoom_sdk.adapter_module",
+        ),
+        help="Python module that wraps Zoom Meeting SDK raw audio callbacks.",
+    )
+    parser.add_argument(
+        "--zoom-sdk-dry-run",
+        action=argparse.BooleanOptionalAction,
+        default=config_bool(
+            zoom_sdk,
+            "dry_run",
+            DEFAULT_ZOOM_SDK_DRY_RUN,
+            "zoom_sdk.dry_run",
+        ),
+        help="Generate a test WAV without joining Zoom; useful for verifying sdk-probe plumbing.",
     )
     parser.add_argument(
         "--input-device",
@@ -783,6 +899,13 @@ def parse_args():
         help="Maximum seconds to keep the output stream open while translated audio drains.",
     )
     args = parser.parse_args()
+    if args.mode not in APP_MODES:
+        allowed_modes = ", ".join(sorted(APP_MODES))
+        raise SystemExit(f"app.mode must be one of: {allowed_modes}.")
+    if args.zoom_sdk_probe_seconds <= 0:
+        raise SystemExit("zoom_sdk.probe_seconds must be greater than 0.")
+    if args.zoom_sdk_sample_rate <= 0:
+        raise SystemExit("zoom_sdk.sample_rate must be greater than 0.")
     args.hostapi_preference = remove_blocked_hostapis(args.hostapi_preference)
     validate_runtime_args(args)
     return args
@@ -803,6 +926,8 @@ def main() -> None:
             cli_args.test_seconds,
             cli_args.test_volume,
         )
+    elif cli_args.mode == "sdk-probe":
+        asyncio.run(run_sdk_probe(cli_args))
     else:
         asyncio.run(run(cli_args))
 

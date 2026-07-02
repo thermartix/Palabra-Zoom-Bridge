@@ -1,3 +1,8 @@
+[app]
+# Use "cable" for the current virtual-cable bridge. Use "sdk-probe" to test
+# Zoom Meeting SDK raw-audio capture without starting Palabra.
+mode = "cable"
+
 [translation]
 source_language = "es"
 target_language = "en"
@@ -54,3 +59,18 @@ max_tempo = 1.0
 test_seconds = 3.0
 test_volume = 0.5
 record_debug_mp3 = false
+
+[zoom_sdk]
+meeting_number = ""
+password = ""
+display_name = "Palabra SDK Probe"
+probe_seconds = 10.0
+output_wav = "debug/zoom_sdk_probe.wav"
+sample_rate = 48000
+channels = 1
+# Adapter module contract:
+# - run_probe(settings, audio_callback), or
+# - create_adapter(settings, audio_callback).run_probe()
+# audio_callback receives pcm_s16le bytes, sample_rate, channels.
+adapter_module = ""
+dry_run = false
