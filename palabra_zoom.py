@@ -39,7 +39,7 @@ from scipy.signal import resample_poly
 SESSION_URL = "https://api.palabra.ai/session-storage/session"
 SESSIONS_URL = "https://api.palabra.ai/session-storage/sessions"
 APP_NAME = "Palabra Zoom Bridge"
-__version__ = "0.3.6"
+__version__ = "0.3.7"
 APP_VERSION = __version__
 CONFIG_PATH = Path("config.toml")
 LOG_DIR = Path("logs")
@@ -1249,6 +1249,29 @@ def compact_palabra_ids(data: dict) -> dict:
     }
 
 
+def compact_payload_shape(data: dict) -> dict:
+    shape = {}
+    for key, value in data.items():
+        if isinstance(value, dict):
+            shape[key] = {"type": "dict", "keys": sorted(value.keys())}
+        elif isinstance(value, list):
+            shape[key] = {"type": "list", "length": len(value)}
+        elif isinstance(value, str):
+            shape[key] = {"type": "str", "length": len(value)}
+        else:
+            shape[key] = {"type": type(value).__name__, "value": value}
+    return shape
+
+
+def audio_group_key(data: dict) -> Optional[tuple[str, str, str]]:
+    transcription_id = data.get("transcription_id")
+    translation_part_id = data.get("translation_part_id")
+    language = data.get("language")
+    if transcription_id is None or translation_part_id is None or language is None:
+        return None
+    return str(transcription_id), str(translation_part_id), str(language)
+
+
 class AudioBridge:
     def __init__(
         self,
@@ -1327,6 +1350,8 @@ class AudioBridge:
         self.playback_dropped = 0
         self.playback_status_count = 0
         self.output_audio_chunks = 0
+        self.output_audio_groups: dict[tuple[str, str, str], dict[str, object]] = {}
+        self.last_output_audio_group_key: Optional[tuple[str, str, str]] = None
         self.dumped_palabra_message_types: set[str] = set()
         self.api_input_recorder: Optional[WavDebugRecorder] = None
         self.api_output_recorder: Optional[WavDebugRecorder] = None
@@ -1815,6 +1840,80 @@ class AudioBridge:
             flush=True,
         )
 
+    def _log_skipped_output_audio(self, reason: str, data: dict, transcription: object) -> None:
+        if self.debug_text_logger is not None:
+            fields = {
+                "reason": reason,
+                "payload_shape": compact_payload_shape(data),
+            }
+            if isinstance(transcription, dict):
+                fields.update(compact_palabra_ids(transcription))
+                fields["transcription_shape"] = compact_payload_shape(transcription)
+            else:
+                fields["transcription_type"] = type(transcription).__name__
+            self.debug_text_logger.write("skipped_output_audio_data", **fields)
+        print(f"[diagnostics] skipped output_audio_data: {reason}", flush=True)
+
+    def _update_output_audio_group(
+        self,
+        group_key: Optional[tuple[str, str, str]],
+        transcription: dict,
+        duration_ms: float,
+    ) -> None:
+        if group_key is None:
+            return
+        group = self.output_audio_groups.setdefault(
+            group_key,
+            {
+                "chunks": 0,
+                "duration_ms": 0.0,
+                "complete": False,
+                "warned_incomplete": False,
+            },
+        )
+        if (
+            self.last_output_audio_group_key is not None
+            and self.last_output_audio_group_key != group_key
+        ):
+            self._log_incomplete_output_audio_group(
+                self.last_output_audio_group_key,
+                self.output_audio_groups[self.last_output_audio_group_key],
+                "next_output_group",
+            )
+        self.last_output_audio_group_key = group_key
+        group["chunks"] = int(group["chunks"]) + 1
+        group["duration_ms"] = float(group["duration_ms"]) + duration_ms
+        group["complete"] = transcription.get("last_chunk") is True
+
+    def _log_incomplete_output_audio_group(
+        self,
+        key: tuple[str, str, str],
+        group: dict[str, object],
+        trigger: str,
+    ) -> None:
+        if group.get("complete") is True or group.get("warned_incomplete") is True:
+            return
+        group["warned_incomplete"] = True
+        fields = {
+            "trigger": trigger,
+            "transcription_id": key[0],
+            "translation_part_id": key[1],
+            "language": key[2],
+            "chunks": group.get("chunks"),
+            "duration_ms": round(float(group.get("duration_ms", 0.0)), 1),
+        }
+        if self.debug_text_logger is not None:
+            self.debug_text_logger.write("incomplete_output_audio_group", **fields)
+        print(
+            "[diagnostics] output audio group ended without last_chunk=true: "
+            f"{key[0]} / part {key[1]} / {key[2]}",
+            flush=True,
+        )
+
+    def _log_incomplete_output_audio_groups(self, trigger: str) -> None:
+        for key, group in self.output_audio_groups.items():
+            self._log_incomplete_output_audio_group(key, group, trigger)
+
     async def receive_audio(
         self,
         websocket,
@@ -1828,33 +1927,43 @@ class AudioBridge:
                 self._dump_palabra_message_shape(msg_type, data)
 
             if msg_type == "output_audio_data":
-                transcription = data.get("transcription", data)
-                if not isinstance(transcription, dict):
+                transcription_payload = data.get("transcription")
+                if isinstance(transcription_payload, dict):
+                    transcription = transcription_payload
+                elif "data" in data:
                     transcription = data
+                    if transcription_payload is not None and self.debug_text_logger is not None:
+                        self.debug_text_logger.write(
+                            "output_audio_top_level_fallback",
+                            transcription_type=type(transcription_payload).__name__,
+                            payload_shape=compact_payload_shape(data),
+                        )
+                else:
+                    self._log_skipped_output_audio(
+                        "no transcription object or top-level audio data",
+                        data,
+                        transcription_payload,
+                    )
+                    continue
                 encoded_audio = transcription.get("data")
                 if not isinstance(encoded_audio, str):
+                    self._log_skipped_output_audio("missing string audio data", data, transcription)
                     continue
                 segment_end = transcription.get("last_chunk") is True
-                transcription_id = transcription.get("transcription_id")
-                translation_part_id = transcription.get("translation_part_id")
-                language = transcription.get("language")
-                phrase_key = (
-                    (str(transcription_id), str(translation_part_id), str(language))
-                    if transcription_id is not None
-                    and translation_part_id is not None
-                    and language is not None
-                    else None
-                )
-                api_audio = np.frombuffer(base64.b64decode(encoded_audio), dtype=np.int16)
+                phrase_key = audio_group_key(transcription)
+                try:
+                    api_audio = np.frombuffer(base64.b64decode(encoded_audio), dtype=np.int16)
+                except Exception:
+                    self._log_skipped_output_audio("invalid base64 audio data", data, transcription)
+                    continue
+                duration_ms = len(api_audio) / max(1, self.output_api_rate * self.output_api_channels) * 1000
+                self._update_output_audio_group(phrase_key, transcription, duration_ms)
                 if self.api_output_recorder is not None:
                     self.api_output_recorder.write(api_audio)
                 if self.debug_text_logger is not None:
                     self.debug_text_logger.write(
                         "output_audio_chunk",
-                        duration_ms=round(
-                            len(api_audio) / max(1, self.output_api_rate * self.output_api_channels) * 1000,
-                            1,
-                        ),
+                        duration_ms=round(duration_ms, 1),
                         samples=len(api_audio),
                         text=first_text_value(transcription, "translation", "translations", "transcription"),
                         **compact_palabra_ids(transcription),
@@ -1935,6 +2044,7 @@ class AudioBridge:
             elif msg_type == "current_task":
                 continue
             elif msg_type == "eos":
+                self._log_incomplete_output_audio_groups("eos")
                 self._release_pending_playback_phrase(segment_end=True)
                 print("[palabra] End of stream received.", flush=True)
                 if self.debug_text_logger is not None:
