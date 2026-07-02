@@ -18,9 +18,11 @@ Current state:
   Zoom meeting UI path for probe joins, though the SDK may still create internal
   native windows.
 - `--play-sting` registers a virtual mic and attempts to send a short original
-  test sting after joining VoIP. The probe now joins with audio enabled for this
-  mode and unmutes the actual self participant id. In the current SDK test, Zoom
-  initializes the virtual mic but does not call the raw mic start callback.
+  test sting after joining VoIP. The probe now registers the external audio
+  source before calling `Join`, joins with audio enabled, and unmutes the actual
+  self participant id. In the current SDK test, Zoom accepts
+  `setExternalAudioSource`, initializes the virtual mic during connection, then
+  uninitializes it before `in_meeting` and never calls the raw mic start callback.
 - `--force-mic-send` is a diagnostic companion for `--play-sting`; it tries to
   send as soon as the SDK exposes the virtual mic sender. On this machine the SDK
   rejects that early send with `SDKERR_UNKNOWN`, confirming that the raw mic has
@@ -39,6 +41,11 @@ Current state:
   `SendAudioDataToChannel`. This is not the final interpretation-channel path,
   but it is the next viable SDK audio-output probe because it does not depend on
   raw recording permission or the virtual mic start callback.
+- `--list-sdk-mics`, `--sdk-mic NAME`, and `--hold-seconds N` are diagnostics
+  for the fallback Windows microphone-device path. They confirmed that the SDK
+  can see and select `CABLE-A Output`, but this does not solve multi-agent audio
+  because multiple SDK agents would still share the same Windows microphone
+  device.
 - `ZOOM_SDK_APP_PRIVILEGE_TOKEN` can be set when Zoom requires a separate app
   privilege token. The SDK auth JWT is not used for that join field.
 - Raw audio subscription and interpreter/talkback output are the next steps after
