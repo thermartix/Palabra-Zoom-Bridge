@@ -39,7 +39,7 @@ from scipy.signal import resample_poly
 SESSION_URL = "https://api.palabra.ai/session-storage/session"
 SESSIONS_URL = "https://api.palabra.ai/session-storage/sessions"
 APP_NAME = "Palabra Zoom Bridge"
-__version__ = "0.3.10"
+__version__ = "0.3.11"
 APP_VERSION = __version__
 CONFIG_PATH = Path("config.toml")
 LOG_DIR = Path("logs")
@@ -95,6 +95,8 @@ PLAYBACK_CATCHUP_TARGET_MS = 1200
 PLAYBACK_CATCHUP_FULL_BACKLOG_MS = 4000
 DEFAULT_PLAYBACK_TEMPO = 1.0
 DEFAULT_PLAYBACK_MAX_LOCAL_TEMPO = 1.06
+DEFAULT_PLAYBACK_TEMPO_ALGORITHM = "resample"
+PLAYBACK_TEMPO_ALGORITHMS = {"resample", "wsola"}
 DEFAULT_PLAYBACK_FADE_MS = 5
 DEFAULT_IDLE_NOISE_AMPLITUDE = 96
 BLOCKED_HOSTAPIS = {"Windows WASAPI"}
@@ -1070,6 +1072,9 @@ def validate_runtime_args(args) -> None:
         raise SystemExit("bridge.playback_max_tempo must be 1.0 or greater.")
     if args.playback_max_tempo < args.playback_tempo:
         raise SystemExit("bridge.playback_max_tempo must be greater than or equal to bridge.playback_tempo.")
+    if args.playback_tempo_algorithm not in PLAYBACK_TEMPO_ALGORITHMS:
+        allowed = ", ".join(sorted(PLAYBACK_TEMPO_ALGORITHMS))
+        raise SystemExit(f"bridge.playback_tempo_algorithm must be one of: {allowed}.")
     if args.task_ready_timeout <= 0:
         raise SystemExit("bridge.task_ready_timeout_seconds must be greater than 0.")
     if args.task_poll_seconds <= 0:
@@ -1294,6 +1299,7 @@ class AudioBridge:
         phrase_start_buffer_ms: int,
         playback_tempo: float,
         playback_max_tempo: float,
+        playback_tempo_algorithm: str,
         playback_fade_ms: int,
         idle_noise_amplitude: int,
         output_gain: float,
@@ -1335,6 +1341,7 @@ class AudioBridge:
         )
         self.playback_tempo = max(1.0, float(playback_tempo))
         self.playback_max_tempo = max(1.0, float(playback_max_tempo))
+        self.playback_tempo_algorithm = playback_tempo_algorithm
         self.playback_fade_frames = max(1, int(device_rate * playback_fade_ms / 1000))
         noise_frames = max(device_rate, self.playback_fade_frames)
         noise_rng = np.random.default_rng(1)
@@ -1538,7 +1545,76 @@ class AudioBridge:
         output_frames = output_samples // self.device_channels
         if input_frames <= 0 or output_frames <= 0:
             return np.zeros(output_samples, dtype=np.int16)
+        if self.playback_tempo_algorithm == "wsola" and input_frames > output_frames:
+            return self._speed_adjust_playback_slice_wsola(audio, output_samples)
+        return self._speed_adjust_playback_slice_resample(audio, output_samples)
 
+    def _speed_adjust_playback_slice_wsola(self, audio: np.ndarray, output_samples: int) -> np.ndarray:
+        input_frames = len(audio) // self.device_channels
+        output_frames = output_samples // self.device_channels
+        if input_frames <= output_frames:
+            return self._speed_adjust_playback_slice_resample(audio, output_samples)
+
+        shaped = audio.reshape(input_frames, self.device_channels).astype(np.float32)
+        tempo = input_frames / float(output_frames)
+        window_frames = min(
+            input_frames,
+            output_frames,
+            max(64, int(self.device_rate * 0.012)),
+        )
+        hop_out = max(16, window_frames // 2)
+        overlap_frames = window_frames - hop_out
+        search_frames = max(8, int(self.device_rate * 0.004))
+        window = np.hanning(window_frames).astype(np.float32)[:, None]
+        if not np.any(window):
+            window = np.ones((window_frames, 1), dtype=np.float32)
+
+        out_len = output_frames + window_frames
+        output = np.zeros((out_len, self.device_channels), dtype=np.float32)
+        weights = np.zeros((out_len, 1), dtype=np.float32)
+        out_pos = 0
+        first = True
+
+        while out_pos < output_frames:
+            expected = int(round(out_pos * tempo))
+            if first or overlap_frames <= 0 or out_pos + overlap_frames > out_len:
+                in_pos = min(expected, max(0, input_frames - window_frames))
+            else:
+                previous = output[out_pos : out_pos + overlap_frames]
+                previous_weight = np.maximum(weights[out_pos : out_pos + overlap_frames], 1.0e-6)
+                previous_mono = np.mean(previous / previous_weight, axis=1)
+                start = max(0, expected - search_frames)
+                stop = min(max(0, input_frames - window_frames), expected + search_frames)
+                best_score = None
+                in_pos = min(expected, max(0, input_frames - window_frames))
+                for candidate in range(start, stop + 1, 2):
+                    candidate_mono = np.mean(shaped[candidate : candidate + overlap_frames], axis=1)
+                    diff = previous_mono - candidate_mono
+                    score = float(np.dot(diff, diff))
+                    if best_score is None or score < best_score:
+                        best_score = score
+                        in_pos = candidate
+
+            segment = shaped[in_pos : in_pos + window_frames]
+            if len(segment) < window_frames:
+                pad = np.zeros((window_frames - len(segment), self.device_channels), dtype=np.float32)
+                segment = np.vstack((segment, pad))
+            end_pos = min(out_len, out_pos + window_frames)
+            segment = segment[: end_pos - out_pos]
+            segment_window = window[: len(segment)]
+            output[out_pos:end_pos] += segment * segment_window
+            weights[out_pos:end_pos] += segment_window
+            out_pos += hop_out
+            first = False
+
+        adjusted = output[:output_frames] / np.maximum(weights[:output_frames], 1.0e-6)
+        return np.clip(np.rint(adjusted), -32768, 32767).astype(np.int16).reshape(-1)
+
+    def _speed_adjust_playback_slice_resample(self, audio: np.ndarray, output_samples: int) -> np.ndarray:
+        input_frames = len(audio) // self.device_channels
+        output_frames = output_samples // self.device_channels
+        if input_frames <= 0 or output_frames <= 0:
+            return np.zeros(output_samples, dtype=np.int16)
         shaped = audio.reshape(input_frames, self.device_channels).astype(np.float32)
         ratio = Fraction(output_frames, input_frames).limit_denominator(1000)
         adjusted = resample_poly(shaped, ratio.numerator, ratio.denominator, axis=0)
@@ -2111,6 +2187,7 @@ def build_audio_bridge(args) -> AudioBridge:
         phrase_start_buffer_ms=args.phrase_start_buffer_ms,
         playback_tempo=args.playback_tempo,
         playback_max_tempo=args.playback_max_tempo,
+        playback_tempo_algorithm=args.playback_tempo_algorithm,
         playback_fade_ms=args.playback_fade_ms,
         idle_noise_amplitude=args.idle_noise_amplitude,
         output_gain=args.output_gain,
@@ -2823,6 +2900,17 @@ def parse_args():
             "bridge.playback_max_tempo",
         ),
         help="Maximum local playback speed-up when translated audio backlog builds. Overrides config.toml.",
+    )
+    parser.add_argument(
+        "--playback-tempo-algorithm",
+        choices=sorted(PLAYBACK_TEMPO_ALGORITHMS),
+        default=config_string(
+            bridge,
+            "playback_tempo_algorithm",
+            DEFAULT_PLAYBACK_TEMPO_ALGORITHM,
+            "bridge.playback_tempo_algorithm",
+        ),
+        help="Local tempo algorithm: resample changes pitch, wsola preserves pitch better. Overrides config.toml.",
     )
     parser.add_argument(
         "--playback-fade-ms",

@@ -1,6 +1,6 @@
 # Palabra Zoom Bridge
 
-Version: 0.3.10
+Version: 0.3.11
 
 Local MVP bridge for one Zoom interpretation channel:
 
@@ -61,6 +61,7 @@ input_block_ms = 50
 playback_buffer_ms = 500
 playback_tempo = 1.075
 playback_max_tempo = 1.15
+playback_tempo_algorithm = "wsola"
 playback_fade_ms = 5
 idle_noise_amplitude = 0
 output_gain = 0.55
@@ -92,7 +93,7 @@ record_debug_mp3 = false
 
 `channels` controls the Palabra websocket input format. Palabra websocket output is handled as fixed 24 kHz mono audio, per the API contract, and is then resampled/remixed for the local cable. `device_channels` controls the local Windows virtual cable streams. The proven-good setup keeps Palabra input mono and writes stereo into Zoom's microphone cable, which prevents silent interpretation audio with VB-Cable endpoints that appear as multi-channel DirectSound devices.
 
-`playback_buffer_ms` is the base jitter buffer before audio is released to Zoom's microphone cable. Set it in `config.toml` to 300 ms or higher; lower values are not recommended for stable live playback. `phrase_start_buffer_ms` is a larger first-phrase buffer that smooths Palabra chunk jitter before partial phrase audio is released; raise it if words still split with silence, or lower it if latency matters more. The bridge groups Palabra audio by `transcription_id`, `translation_part_id`, and language, then waits to release the start of each phrase until it has enough audio for the phrase-start buffer or Palabra marks the phrase complete with `last_chunk`. `playback_tempo` is the normal local playback speed, and `playback_max_tempo` is the catch-up ceiling when translated audio backlog builds; both affect only the local Zoom microphone output, not the raw Palabra API audio. If playback still underruns during active speech, the bridge holds the remaining partial audio for the next refill instead of playing a tiny word fragment into silence, grows the buffer in small 200 ms steps, and later relaxes back down after stable playback. A local quiet-block gate remains as a fallback.
+`playback_buffer_ms` is the base jitter buffer before audio is released to Zoom's microphone cable. Set it in `config.toml` to 300 ms or higher; lower values are not recommended for stable live playback. `phrase_start_buffer_ms` is a larger first-phrase buffer that smooths Palabra chunk jitter before partial phrase audio is released; raise it if words still split with silence, or lower it if latency matters more. The bridge groups Palabra audio by `transcription_id`, `translation_part_id`, and language, then waits to release the start of each phrase until it has enough audio for the phrase-start buffer or Palabra marks the phrase complete with `last_chunk`. `playback_tempo` is the normal local playback speed, and `playback_max_tempo` is the catch-up ceiling when translated audio backlog builds; both affect only the local Zoom microphone output, not the raw Palabra API audio. `playback_tempo_algorithm = "wsola"` uses local overlap-add stretching to preserve pitch better than `"resample"`, which is cheaper but raises pitch. If playback still underruns during active speech, the bridge holds the remaining partial audio for the next refill instead of playing a tiny word fragment into silence, grows the buffer in small 200 ms steps, and later relaxes back down after stable playback. A local quiet-block gate remains as a fallback.
 
 `playback_fade_ms`, `idle_noise_amplitude`, and `output_gain` control the exact stream sent into Zoom's microphone cable. With Zoom Original Sound enabled, keep `idle_noise_amplitude = 0` unless you are specifically testing Zoom gating. `output_gain` reduces the translated signal before Zoom so downstream automatic gain or recording does not clip.
 
