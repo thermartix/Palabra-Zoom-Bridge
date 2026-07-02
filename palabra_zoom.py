@@ -38,7 +38,7 @@ from scipy.signal import resample_poly
 SESSION_URL = "https://api.palabra.ai/session-storage/session"
 SESSIONS_URL = "https://api.palabra.ai/session-storage/sessions"
 APP_NAME = "Palabra Zoom Bridge"
-__version__ = "0.3.2"
+__version__ = "0.3.3"
 APP_VERSION = __version__
 CONFIG_PATH = Path("config.toml")
 LOG_DIR = Path("logs")
@@ -184,12 +184,16 @@ def write_last_error_log(error: BaseException) -> None:
 
 
 class Mp3DebugRecorder:
+    QUEUE_MAX_BLOCKS = 900
+
     def __init__(self, path: Path, sample_rate: int, channels: int) -> None:
         self.path = path
         self.sample_rate = sample_rate
         self.channels = channels
         self.process: Optional[subprocess.Popen] = None
-        self.lock = threading.Lock()
+        self.queue: queue.Queue[Optional[np.ndarray]] = queue.Queue(maxsize=self.QUEUE_MAX_BLOCKS)
+        self.thread: Optional[threading.Thread] = None
+        self.dropped_blocks = 0
 
     def __enter__(self) -> "Mp3DebugRecorder":
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -219,55 +223,35 @@ class Mp3DebugRecorder:
             ],
             stdin=subprocess.PIPE,
         )
-        return self
-
-    def write(self, audio: np.ndarray) -> None:
-        if self.process is None or self.process.stdin is None or len(audio) == 0:
-            return
-        with self.lock:
-            with contextlib.suppress(BrokenPipeError):
-                self.process.stdin.write(audio.astype(np.int16, copy=False).tobytes())
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        if self.process is not None:
-            if self.process.stdin is not None:
-                with contextlib.suppress(BrokenPipeError):
-                    self.process.stdin.close()
-            self.process.wait()
-            self.process = None
-
-
-@dataclasses.dataclass
-class PlaybackChunk:
-    audio: np.ndarray
-    segment_end: bool = False
-
-
-class AsyncMp3DebugRecorder(Mp3DebugRecorder):
-    def __init__(self, path: Path, sample_rate: int, channels: int) -> None:
-        super().__init__(path, sample_rate, channels)
-        self.queue: queue.Queue[Optional[np.ndarray]] = queue.Queue(maxsize=300)
-        self.thread: Optional[threading.Thread] = None
-
-    def __enter__(self) -> "AsyncMp3DebugRecorder":
-        super().__enter__()
-
-        def run() -> None:
-            while True:
-                audio = self.queue.get()
-                if audio is None:
-                    break
-                super(AsyncMp3DebugRecorder, self).write(audio)
-
-        self.thread = threading.Thread(target=run, daemon=True)
+        self.thread = threading.Thread(target=self._run_encoder, daemon=True)
         self.thread.start()
         return self
+
+    def _run_encoder(self) -> None:
+        while True:
+            audio = self.queue.get()
+            if audio is None:
+                break
+            self._write_to_ffmpeg(audio)
+
+    def _write_to_ffmpeg(self, audio: np.ndarray) -> None:
+        if self.process is None or self.process.stdin is None or len(audio) == 0:
+            return
+        with contextlib.suppress(BrokenPipeError):
+            self.process.stdin.write(audio.astype(np.int16, copy=False).tobytes())
 
     def write(self, audio: np.ndarray) -> None:
         if self.process is None or len(audio) == 0:
             return
-        with contextlib.suppress(queue.Full):
-            self.queue.put_nowait(audio.astype(np.int16, copy=True))
+        block = audio.astype(np.int16, copy=True)
+        try:
+            self.queue.put_nowait(block)
+        except queue.Full:
+            self.dropped_blocks += 1
+            with contextlib.suppress(queue.Empty):
+                self.queue.get_nowait()
+            with contextlib.suppress(queue.Full):
+                self.queue.put_nowait(block)
 
     def __exit__(self, exc_type, exc, tb) -> None:
         if self.thread is not None:
@@ -276,11 +260,25 @@ class AsyncMp3DebugRecorder(Mp3DebugRecorder):
                     self.queue.put(None, timeout=0.1)
                     break
                 except queue.Full:
+                    self.dropped_blocks += 1
                     with contextlib.suppress(queue.Empty):
                         self.queue.get_nowait()
-            self.thread.join(timeout=2)
+            self.thread.join(timeout=10)
             self.thread = None
-        super().__exit__(exc_type, exc, tb)
+        if self.process is not None:
+            if self.process.stdin is not None:
+                with contextlib.suppress(BrokenPipeError):
+                    self.process.stdin.close()
+            self.process.wait()
+            self.process = None
+        if self.dropped_blocks:
+            print(f"Warning: dropped {self.dropped_blocks} debug MP3 block(s) for {self.path}", flush=True)
+
+
+@dataclasses.dataclass
+class PlaybackChunk:
+    audio: np.ndarray
+    segment_end: bool = False
 
 
 class DebugTextLogger:
