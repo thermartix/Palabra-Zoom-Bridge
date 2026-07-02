@@ -39,7 +39,7 @@ from scipy.signal import resample_poly
 SESSION_URL = "https://api.palabra.ai/session-storage/session"
 SESSIONS_URL = "https://api.palabra.ai/session-storage/sessions"
 APP_NAME = "Palabra Zoom Bridge"
-__version__ = "0.3.16"
+__version__ = "0.3.17"
 APP_VERSION = __version__
 CONFIG_PATH = Path("config.toml")
 LOG_DIR = Path("logs")
@@ -73,6 +73,7 @@ DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS = 6.0
 DEFAULT_PLAYBACK_DRAIN_TIMEOUT_SECONDS = 30.0
 DEFAULT_RAW_PALABRA_PLAYBACK = False
 DEFAULT_OUTPUT_GAIN = 0.55
+DEFAULT_OUTPUT_PEAK_LIMIT = 0.65
 DEFAULT_SEGMENT_CONFIRMATION_SILENCE_THRESHOLD = 0.3
 DEFAULT_ONLY_CONFIRM_BY_SILENCE = False
 DEFAULT_SENTENCE_SPLITTER_ENABLED = True
@@ -1079,6 +1080,8 @@ def validate_runtime_args(args) -> None:
     if args.playback_tempo_algorithm not in PLAYBACK_TEMPO_ALGORITHMS:
         allowed = ", ".join(sorted(PLAYBACK_TEMPO_ALGORITHMS))
         raise SystemExit(f"bridge.playback_tempo_algorithm must be one of: {allowed}.")
+    if args.output_peak_limit < 0.0 or args.output_peak_limit > 1.0:
+        raise SystemExit("bridge.output_peak_limit must be between 0.0 and 1.0.")
     if args.task_ready_timeout <= 0:
         raise SystemExit("bridge.task_ready_timeout_seconds must be greater than 0.")
     if args.task_poll_seconds <= 0:
@@ -1307,6 +1310,7 @@ class AudioBridge:
         playback_fade_ms: int,
         idle_noise_amplitude: int,
         output_gain: float,
+        output_peak_limit: float,
         raw_palabra_playback: bool,
     ) -> None:
         self.input_device = input_device
@@ -1319,6 +1323,7 @@ class AudioBridge:
         self.output_api_channels = PALABRA_OUTPUT_CHANNELS
         self.device_channels = device_channels
         self.output_gain = max(0.0, float(output_gain))
+        self.output_peak_limit = max(0.0, min(1.0, float(output_peak_limit)))
         self.raw_palabra_playback = bool(raw_palabra_playback)
         self.input_blocksize = stream_blocksize(device_rate, input_block_ms)
         self.playback_base_preroll_samples = int(device_rate * playback_buffer_ms / 1000) * device_channels
@@ -1522,6 +1527,15 @@ class AudioBridge:
 
     def _fill_idle_audio(self, outdata, frames: int) -> None:
         outdata[:] = self._idle_audio(frames * self.device_channels).reshape(frames, self.device_channels)
+
+    def _limit_callback_output(self, outdata) -> None:
+        if self.output_peak_limit <= 0.0:
+            return
+        peak = int(round(32767 * self.output_peak_limit))
+        if peak <= 0:
+            outdata.fill(0)
+            return
+        np.clip(outdata, -peak, peak, out=outdata)
 
     def _fade_in(self, audio: np.ndarray) -> None:
         frames = min(self.playback_fade_frames, len(audio) // self.device_channels)
@@ -1849,6 +1863,7 @@ class AudioBridge:
                     self.playback_started = False
                     self._fill_idle_audio(outdata, frames)
 
+                self._limit_callback_output(outdata)
                 if self.callback_output_recorder is not None:
                     self.callback_output_recorder.write(outdata.reshape(-1))
                 return
@@ -1891,6 +1906,7 @@ class AudioBridge:
                     self.playback_started = False
                 self._fill_idle_audio(outdata, frames)
 
+            self._limit_callback_output(outdata)
             if self.callback_output_recorder is not None:
                 self.callback_output_recorder.write(outdata.reshape(-1))
 
@@ -2237,6 +2253,7 @@ def build_audio_bridge(args) -> AudioBridge:
         playback_fade_ms=args.playback_fade_ms,
         idle_noise_amplitude=args.idle_noise_amplitude,
         output_gain=args.output_gain,
+        output_peak_limit=args.output_peak_limit,
         raw_palabra_playback=args.raw_palabra_playback,
     )
 
@@ -2993,6 +3010,17 @@ def parse_args():
             "bridge.output_gain",
         ),
         help="Gain applied to translated audio before Zoom's microphone cable.",
+    )
+    parser.add_argument(
+        "--output-peak-limit",
+        type=float,
+        default=config_float(
+            bridge,
+            "output_peak_limit",
+            DEFAULT_OUTPUT_PEAK_LIMIT,
+            "bridge.output_peak_limit",
+        ),
+        help="Final callback peak limiter from 0.0 to 1.0 before Zoom's microphone cable.",
     )
     parser.add_argument(
         "--segment-confirmation-silence-threshold",

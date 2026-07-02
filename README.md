@@ -1,6 +1,6 @@
 # Palabra Zoom Bridge
 
-Version: 0.3.16
+Version: 0.3.17
 
 Local MVP bridge for one Zoom interpretation channel:
 
@@ -65,6 +65,7 @@ playback_tempo_algorithm = "resample"
 playback_fade_ms = 5
 idle_noise_amplitude = 0
 output_gain = 0.55
+output_peak_limit = 0.65
 startup_delay = 0.0
 task_ready_timeout_seconds = 30.0
 task_poll_seconds = 2.0
@@ -98,7 +99,7 @@ record_debug_mp3 = false
 
 `playback_buffer_ms` is the base jitter buffer before audio is released to Zoom's microphone cable. Set it in `config.toml` to 300 ms or higher; lower values are not recommended for stable live playback. `phrase_start_buffer_ms` is a larger first-phrase buffer that smooths Palabra chunk jitter before partial phrase audio is released; raise it if words still split with silence, or lower it if latency matters more. The bridge groups Palabra audio by `transcription_id`, `translation_part_id`, and language, then waits to release the start of each phrase until it has enough audio for the phrase-start buffer or Palabra marks the phrase complete with `last_chunk`. `playback_tempo` is the normal local playback speed, and `playback_max_tempo` is the catch-up ceiling when translated audio backlog builds; both affect only the local Zoom microphone output, not the raw Palabra API audio. Tempo adjustment is applied before audio enters the callback playback queue, so the callback only copies prepared PCM. Keep `playback_tempo_algorithm = "resample"` for the stable live path; `"rubberband"` is experimental and accumulates larger blocks before playback, so check the callback debug MP3 for artifacts. If playback still underruns during active speech, the bridge holds the remaining partial audio for the next refill instead of playing a tiny word fragment into silence, grows the buffer in small 200 ms steps, and later relaxes back down after stable playback. A local quiet-block gate remains as a fallback.
 
-`playback_fade_ms`, `idle_noise_amplitude`, and `output_gain` control the exact stream sent into Zoom's microphone cable. With Zoom Original Sound enabled, keep `idle_noise_amplitude = 0` unless you are specifically testing Zoom gating. `output_gain` reduces the translated signal before Zoom so downstream automatic gain or recording does not clip.
+`playback_fade_ms`, `idle_noise_amplitude`, `output_gain`, and `output_peak_limit` control the exact stream sent into Zoom's microphone cable. With Zoom Original Sound enabled, keep `idle_noise_amplitude = 0` unless you are specifically testing Zoom gating. `output_gain` reduces the translated signal before Zoom so downstream automatic gain or recording does not clip. `output_peak_limit` is a final callback limiter; keep it below 1.0 to prevent rare processing spikes or clicks from hitting Zoom hard enough to trigger automatic mic-volume ducking.
 
 `startup_delay` is now only an optional extra settle delay after Palabra reports `current_task`; normal startup readiness is driven by `get_task` polling. Manual Ctrl+C shutdown sends Palabra `end_task` and waits briefly for EOS so the last interpreted phrase can drain. Zoom meeting-ended shutdown closes immediately because there is no meeting audio path left.
 
