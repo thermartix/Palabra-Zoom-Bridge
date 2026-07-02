@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
+#include <cmath>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -14,7 +15,11 @@
 
 #include "auth_service_interface.h"
 #include "meeting_service_interface.h"
+#include "meeting_service_components/meeting_audio_interface.h"
+#include "meeting_service_components/meeting_participants_ctrl_interface.h"
 #include "network_connection_handler_interface.h"
+#include "rawdata/rawdata_audio_helper_interface.h"
+#include "rawdata/zoom_rawdata_api.h"
 #include "zoom_sdk.h"
 
 namespace {
@@ -27,13 +32,19 @@ using ZOOM_SDK_NAMESPACE::IAccountInfo;
 using ZOOM_SDK_NAMESPACE::IAuthService;
 using ZOOM_SDK_NAMESPACE::IAuthServiceEvent;
 using ZOOM_SDK_NAMESPACE::IMeetingAppSignalHandler;
+using ZOOM_SDK_NAMESPACE::IMeetingAudioController;
+using ZOOM_SDK_NAMESPACE::IMeetingParticipantsController;
 using ZOOM_SDK_NAMESPACE::IMeetingService;
 using ZOOM_SDK_NAMESPACE::IMeetingServiceEvent;
 using ZOOM_SDK_NAMESPACE::INetworkConnectionHandler;
 using ZOOM_SDK_NAMESPACE::INetworkConnectionHelper;
 using ZOOM_SDK_NAMESPACE::IProxySettingHandler;
 using ZOOM_SDK_NAMESPACE::ISSLCertVerificationHandler;
+using ZOOM_SDK_NAMESPACE::IZoomSDKAudioRawDataHelper;
+using ZOOM_SDK_NAMESPACE::IZoomSDKAudioRawDataSender;
+using ZOOM_SDK_NAMESPACE::IZoomSDKVirtualAudioMicEvent;
 using ZOOM_SDK_NAMESPACE::InitParam;
+using ZOOM_SDK_NAMESPACE::IUserInfo;
 using ZOOM_SDK_NAMESPACE::LANGUAGE_English;
 using ZOOM_SDK_NAMESPACE::LoginFailReason;
 using ZOOM_SDK_NAMESPACE::LOGINSTATUS;
@@ -52,6 +63,7 @@ using ZOOM_SDK_NAMESPACE::SDK_UT_WITHOUT_LOGIN;
 using ZOOM_SDK_NAMESPACE::SDKERR_SUCCESS;
 using ZOOM_SDK_NAMESPACE::SDKError;
 using ZOOM_SDK_NAMESPACE::StatisticsWarningType;
+using ZOOM_SDK_NAMESPACE::ZoomSDKAudioChannel_Mono;
 using ZOOM_SDK_NAMESPACE::ZoomSDKRawDataMemoryModeHeap;
 #if defined(WIN32)
 using ZOOM_SDK_NAMESPACE::SDKNotificationServiceError;
@@ -67,6 +79,7 @@ typedef SDKError (*CreateMeetingServiceFn)(IMeetingService**);
 typedef SDKError (*DestroyMeetingServiceFn)(IMeetingService*);
 typedef SDKError (*CreateNetworkConnectionHelperFn)(INetworkConnectionHelper**);
 typedef SDKError (*DestroyNetworkConnectionHelperFn)(INetworkConnectionHelper*);
+typedef IZoomSDKAudioRawDataHelper* (*GetAudioRawdataHelperFn)();
 
 std::string JsonEscape(const std::string& value) {
     std::ostringstream out;
@@ -198,6 +211,10 @@ bool HasArg(const std::vector<std::wstring>& args, const wchar_t* name) {
         }
     }
     return false;
+}
+
+bool HasAnyArg(const std::vector<std::wstring>& args, const wchar_t* first, const wchar_t* second) {
+    return HasArg(args, first) || HasArg(args, second);
 }
 
 int ArgIntValue(const std::vector<std::wstring>& args, const wchar_t* name, int fallback) {
@@ -450,6 +467,130 @@ private:
     int lastResult_;
 };
 
+class StingMicEvent : public IZoomSDKVirtualAudioMicEvent {
+public:
+    explicit StingMicEvent(bool forceSendOnInitialize)
+        : sender_(nullptr),
+          canSend_(false),
+          done_(false),
+          sentSuccessfully_(false),
+          forceSendOnInitialize_(forceSendOnInitialize) {}
+
+    ~StingMicEvent() override {
+        canSend_.store(false);
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+    void onMicInitialize(IZoomSDKAudioRawDataSender* sender) override {
+        sender_ = sender;
+        WriteStatus("virtual mic initialized");
+        if (forceSendOnInitialize_) {
+            StartSending("virtual mic initialize forced-send diagnostic");
+        }
+    }
+
+    void onMicStartSend() override {
+        StartSending("virtual mic start send");
+    }
+
+    void onMicStopSend() override {
+        WriteStatus("virtual mic stop send");
+        canSend_.store(false);
+    }
+
+    void onMicUninitialized() override {
+        WriteStatus("virtual mic uninitialized");
+        canSend_.store(false);
+        sender_ = nullptr;
+    }
+
+    const std::atomic<bool>& done() const {
+        return done_;
+    }
+
+    bool sentSuccessfully() const {
+        return sentSuccessfully_.load();
+    }
+
+private:
+    void StartSending(const char* reason) {
+        if (canSend_.exchange(true)) {
+            WriteStatus(std::string(reason) + " ignored; send thread already running");
+            return;
+        }
+        WriteStatus(reason);
+        done_.store(false);
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+        thread_ = std::thread([this]() { SendSting(); });
+    }
+
+    void SendSting() {
+        if (!sender_) {
+            WriteStatus("virtual mic sender was not available");
+            done_.store(true);
+            return;
+        }
+
+        const int sampleRate = 48000;
+        const int blockFrames = 960;
+        const int totalFrames = sampleRate * 2;
+        const double notes[] = {261.63, 329.63, 392.00, 523.25, 392.00, 523.25};
+        const int noteCount = static_cast<int>(sizeof(notes) / sizeof(notes[0]));
+        const int framesPerNote = totalFrames / noteCount;
+        std::vector<short> samples(blockFrames);
+
+        bool failed = false;
+        for (int frame = 0; frame < totalFrames && canSend_.load(); frame += blockFrames) {
+            int framesThisBlock = std::min(blockFrames, totalFrames - frame);
+            for (int i = 0; i < framesThisBlock; ++i) {
+                int absoluteFrame = frame + i;
+                int noteIndex = std::min(noteCount - 1, absoluteFrame / framesPerNote);
+                double t = static_cast<double>(absoluteFrame) / sampleRate;
+                double local = static_cast<double>(absoluteFrame % framesPerNote) / framesPerNote;
+                double env = std::min(1.0, local * 16.0) * std::min(1.0, (1.0 - local) * 8.0);
+                double base = notes[noteIndex];
+                double wave =
+                    0.70 * std::sin(2.0 * 3.14159265358979323846 * base * t) +
+                    0.22 * std::sin(2.0 * 3.14159265358979323846 * base * 2.0 * t) +
+                    0.08 * std::sin(2.0 * 3.14159265358979323846 * base * 3.0 * t);
+                int value = static_cast<int>(wave * env * 12000.0);
+                value = std::max(-32768, std::min(32767, value));
+                samples[i] = static_cast<short>(value);
+            }
+            if (framesThisBlock < blockFrames) {
+                std::fill(samples.begin() + framesThisBlock, samples.end(), 0);
+            }
+
+            SDKError sendResult = sender_->send(
+                reinterpret_cast<char*>(samples.data()),
+                static_cast<unsigned int>(framesThisBlock * sizeof(short)),
+                sampleRate,
+                ZoomSDKAudioChannel_Mono);
+            if (sendResult != SDKERR_SUCCESS) {
+                WriteStatus("virtual mic send returned SDKError " + std::to_string(static_cast<int>(sendResult)));
+                failed = true;
+                break;
+            }
+            Sleep(20);
+        }
+
+        sentSuccessfully_.store(!failed);
+        done_.store(true);
+        WriteStatus("virtual mic sting completed");
+    }
+
+    IZoomSDKAudioRawDataSender* sender_;
+    std::atomic<bool> canSend_;
+    std::atomic<bool> done_;
+    std::atomic<bool> sentSuccessfully_;
+    bool forceSendOnInitialize_;
+    std::thread thread_;
+};
+
 int PrintHelp() {
     std::cerr
         << "ZoomSdkNativeProbe\n"
@@ -457,6 +598,9 @@ int PrintHelp() {
         << "  --sdk-init          Load sdk.dll and call InitSDK/CleanUPSDK.\n"
         << "  --sdk-auth          Initialize SDK and authenticate with ZOOM_SDK_AUTH_TOKEN.\n"
         << "  --sdk-join          Authenticate and attempt to join ZOOM_SDK_MEETING_NUMBER.\n"
+        << "  --play-sting        After joining, send a short original test sting into the SDK mic.\n"
+        << "  --force-mic-send    Diagnostic: send as soon as the SDK exposes a virtual mic sender.\n"
+        << "  --custom-ui         Initialize the SDK without the default Zoom meeting UI.\n"
         << "  --sdk-root PATH     SDK root, e.g. C:\\dev\\zoom-sdk-windows.\n"
         << "  --timeout SECONDS   SDK call timeout for probe modes. Default: 30.\n"
         << "\n"
@@ -480,6 +624,15 @@ int RunChildWithWatchdog(const std::vector<std::wstring>& args, const wchar_t* p
         commandLine += L" --sdk-root " + QuoteArg(root);
     }
     commandLine += L" --timeout " + std::to_wstring(timeoutSeconds);
+    if (HasAnyArg(args, L"--play-sting", L"--play-test-sting")) {
+        commandLine += L" --play-sting";
+    }
+    if (HasArg(args, L"--force-mic-send")) {
+        commandLine += L" --force-mic-send";
+    }
+    if (HasArg(args, L"--custom-ui")) {
+        commandLine += L" --custom-ui";
+    }
     commandLine += L" --skip-cleanup";
 
     STARTUPINFOW startupInfo = {};
@@ -567,6 +720,10 @@ bool InitializeSdk(const std::vector<std::wstring>& args, LoadedSdk& sdk) {
     initParam.enableLogByDefault = true;
     initParam.enableGenerateDump = true;
     initParam.rawdataOpts.audioRawdataMemoryMode = ZoomSDKRawDataMemoryModeHeap;
+    if (HasArg(args, L"--custom-ui")) {
+        initParam.obConfigOpts.optionalFeatures = ENABLE_CUSTOMIZED_UI_FLAG;
+        WriteStatus("custom UI mode enabled");
+    }
 
     WriteStatus("calling InitSDK");
     SDKError initResult = initSdk(initParam);
@@ -627,12 +784,17 @@ int RunSdkProbe(const std::vector<std::wstring>& args, bool initialize, bool aut
             DestroyMeetingServiceFn destroyMeetingService = reinterpret_cast<DestroyMeetingServiceFn>(sdk.proc("DestroyMeetingService"));
             CreateNetworkConnectionHelperFn createNetworkHelper = reinterpret_cast<CreateNetworkConnectionHelperFn>(sdk.proc("CreateNetworkConnectionHelper"));
             DestroyNetworkConnectionHelperFn destroyNetworkHelper = reinterpret_cast<DestroyNetworkConnectionHelperFn>(sdk.proc("DestroyNetworkConnectionHelper"));
+            GetAudioRawdataHelperFn getAudioRawdataHelper = reinterpret_cast<GetAudioRawdataHelperFn>(sdk.proc("GetAudioRawdataHelper"));
             if (!createAuthService || !destroyAuthService) {
                 WriteError("sdk.dll did not expose CreateAuthService/DestroyAuthService.");
                 return 2;
             }
             if (joinMeeting && (!createMeetingService || !destroyMeetingService)) {
                 WriteError("sdk.dll did not expose CreateMeetingService/DestroyMeetingService.");
+                return 2;
+            }
+            if (joinMeeting && HasAnyArg(args, L"--play-sting", L"--play-test-sting") && !getAudioRawdataHelper) {
+                WriteError("sdk.dll did not expose GetAudioRawdataHelper.");
                 return 2;
             }
             if (!createNetworkHelper || !destroyNetworkHelper) {
@@ -724,6 +886,7 @@ int RunSdkProbe(const std::vector<std::wstring>& args, bool initialize, bool aut
 
             IMeetingService* meetingService = nullptr;
             if (joinMeeting) {
+                bool playSting = HasAnyArg(args, L"--play-sting", L"--play-test-sting");
                 std::wstring meetingNumberRaw = ResolveMeetingNumber();
                 UINT64 meetingNumber = ParseMeetingNumber(meetingNumberRaw);
                 if (meetingNumber == 0) {
@@ -771,7 +934,7 @@ int RunSdkProbe(const std::vector<std::wstring>& args, bool initialize, bool aut
                 withoutLogin.psw = password.empty() ? nullptr : password.c_str();
                 withoutLogin.app_privilege_token = appPrivilegeToken.empty() ? nullptr : appPrivilegeToken.c_str();
                 withoutLogin.isVideoOff = true;
-                withoutLogin.isAudioOff = true;
+                withoutLogin.isAudioOff = !playSting;
                 withoutLogin.isMyVoiceInMix = false;
                 withoutLogin.isAudioRawDataStereo = false;
                 withoutLogin.eAudioRawdataSamplingRate = ZOOM_SDK_NAMESPACE::AudioRawdataSamplingRate_48K;
@@ -823,6 +986,109 @@ int RunSdkProbe(const std::vector<std::wstring>& args, bool initialize, bool aut
                 }
 
                 WriteStatus("Meeting join reached " + MeetingStatusName(meetingEvent.lastStatus()));
+
+                if (playSting) {
+                    IMeetingAudioController* audioController = meetingService->GetMeetingAudioController();
+                    if (!audioController) {
+                        WriteError("Meeting audio controller was not available.");
+                        if (HasArg(args, L"--skip-cleanup")) {
+                            FastExit(2);
+                        }
+                        destroyMeetingService(meetingService);
+                        destroyAuthService(authService);
+                        if (networkHelper) {
+                            networkHelper->UnRegisterNetworkConnectionHandler();
+                            destroyNetworkHelper(networkHelper);
+                        }
+                        return 2;
+                    }
+
+                    IZoomSDKAudioRawDataHelper* audioRawHelper = getAudioRawdataHelper();
+                    if (!audioRawHelper) {
+                        WriteError("GetAudioRawdataHelper returned null.");
+                        if (HasArg(args, L"--skip-cleanup")) {
+                            FastExit(2);
+                        }
+                        destroyMeetingService(meetingService);
+                        destroyAuthService(authService);
+                        if (networkHelper) {
+                            networkHelper->UnRegisterNetworkConnectionHandler();
+                            destroyNetworkHelper(networkHelper);
+                        }
+                        return 2;
+                    }
+
+                    StingMicEvent sting(HasArg(args, L"--force-mic-send"));
+                    SDKError sourceResult = audioRawHelper->setExternalAudioSource(&sting);
+                    WriteStatus("setExternalAudioSource returned SDKError " + std::to_string(static_cast<int>(sourceResult)));
+                    if (sourceResult != SDKERR_SUCCESS) {
+                        WriteError("Could not set external audio source.");
+                        if (HasArg(args, L"--skip-cleanup")) {
+                            FastExit(2);
+                        }
+                        destroyMeetingService(meetingService);
+                        destroyAuthService(authService);
+                        if (networkHelper) {
+                            networkHelper->UnRegisterNetworkConnectionHandler();
+                            destroyNetworkHelper(networkHelper);
+                        }
+                        return 2;
+                    }
+
+                    SDKError joinVoipResult = audioController->JoinVoip();
+                    WriteStatus("JoinVoip returned SDKError " + std::to_string(static_cast<int>(joinVoipResult)));
+                    unsigned int selfUserId = 0;
+                    IMeetingParticipantsController* participantsController = meetingService->GetMeetingParticipantsController();
+                    if (participantsController) {
+                        IUserInfo* myself = participantsController->GetMySelfUser();
+                        if (myself) {
+                            selfUserId = myself->GetUserID();
+                            WriteStatus(
+                                "self user id=" + std::to_string(selfUserId) +
+                                " muted=" + std::to_string(myself->IsAudioMuted() ? 1 : 0) +
+                                " audio_type=" + std::to_string(static_cast<int>(myself->GetAudioJoinType())));
+                        } else {
+                            WriteStatus("GetMySelfUser returned null");
+                        }
+                    } else {
+                        WriteStatus("Meeting participants controller was not available");
+                    }
+                    if (audioController->CanUnMuteBySelf()) {
+                        SDKError unmuteResult = audioController->UnMuteAudio(selfUserId);
+                        WriteStatus("UnMuteAudio(self) returned SDKError " + std::to_string(static_cast<int>(unmuteResult)));
+                    } else {
+                        WriteStatus("SDK reports self-unmute is not currently allowed");
+                    }
+
+                    int playTimeoutSeconds = std::min(10, std::max(3, ArgIntValue(args, L"--timeout", 30) / 6));
+                    if (!WaitForFlag(sting.done(), playTimeoutSeconds)) {
+                        WriteError("Virtual mic sting did not complete within " + std::to_string(playTimeoutSeconds) + " seconds.");
+                        if (HasArg(args, L"--skip-cleanup")) {
+                            FastExit(3);
+                        }
+                        destroyMeetingService(meetingService);
+                        destroyAuthService(authService);
+                        if (networkHelper) {
+                            networkHelper->UnRegisterNetworkConnectionHandler();
+                            destroyNetworkHelper(networkHelper);
+                        }
+                        return 3;
+                    }
+                    if (!sting.sentSuccessfully()) {
+                        WriteError("Virtual mic sting did not send successfully.");
+                        if (HasArg(args, L"--skip-cleanup")) {
+                            FastExit(2);
+                        }
+                        destroyMeetingService(meetingService);
+                        destroyAuthService(authService);
+                        if (networkHelper) {
+                            networkHelper->UnRegisterNetworkConnectionHandler();
+                            destroyNetworkHelper(networkHelper);
+                        }
+                        return 2;
+                    }
+                    WriteStatus("Virtual mic sting sent");
+                }
                 meetingService->Leave(ZOOM_SDK_NAMESPACE::LEAVE_MEETING);
             }
 
