@@ -39,7 +39,7 @@ from scipy.signal import resample_poly
 SESSION_URL = "https://api.palabra.ai/session-storage/session"
 SESSIONS_URL = "https://api.palabra.ai/session-storage/sessions"
 APP_NAME = "Palabra Zoom Bridge"
-__version__ = "0.3.12"
+__version__ = "0.3.13"
 APP_VERSION = __version__
 CONFIG_PATH = Path("config.toml")
 LOG_DIR = Path("logs")
@@ -96,10 +96,7 @@ PLAYBACK_CATCHUP_FULL_BACKLOG_MS = 4000
 DEFAULT_PLAYBACK_TEMPO = 1.0
 DEFAULT_PLAYBACK_MAX_LOCAL_TEMPO = 1.06
 DEFAULT_PLAYBACK_TEMPO_ALGORITHM = "resample"
-PLAYBACK_TEMPO_ALGORITHMS = {"resample", "wsola"}
-WSOLA_WINDOW_MS = 24
-WSOLA_SEARCH_MS = 10
-WSOLA_BOUNDARY_CROSSFADE_MS = 5
+PLAYBACK_TEMPO_ALGORITHMS = {"resample", "rubberband"}
 DEFAULT_PLAYBACK_FADE_MS = 5
 DEFAULT_IDLE_NOISE_AMPLITUDE = 96
 BLOCKED_HOSTAPIS = {"Windows WASAPI"}
@@ -1345,8 +1342,6 @@ class AudioBridge:
         self.playback_tempo = max(1.0, float(playback_tempo))
         self.playback_max_tempo = max(1.0, float(playback_max_tempo))
         self.playback_tempo_algorithm = playback_tempo_algorithm
-        self.wsola_previous_tail: Optional[np.ndarray] = None
-        self.wsola_boundary_crossfade_frames = max(1, int(device_rate * WSOLA_BOUNDARY_CROSSFADE_MS / 1000))
         self.playback_fade_frames = max(1, int(device_rate * playback_fade_ms / 1000))
         noise_frames = max(device_rate, self.playback_fade_frames)
         noise_rng = np.random.default_rng(1)
@@ -1514,9 +1509,6 @@ class AudioBridge:
     def _fill_idle_audio(self, outdata, frames: int) -> None:
         outdata[:] = self._idle_audio(frames * self.device_channels).reshape(frames, self.device_channels)
 
-    def _reset_tempo_state(self) -> None:
-        self.wsola_previous_tail = None
-
     def _fade_in(self, audio: np.ndarray) -> None:
         frames = min(self.playback_fade_frames, len(audio) // self.device_channels)
         if frames <= 1:
@@ -1552,105 +1544,68 @@ class AudioBridge:
         input_frames = len(audio) // self.device_channels
         output_frames = output_samples // self.device_channels
         if input_frames <= 0 or output_frames <= 0:
-            self._reset_tempo_state()
             return np.zeros(output_samples, dtype=np.int16)
-        if self.playback_tempo_algorithm == "wsola" and input_frames > output_frames:
-            return self._speed_adjust_playback_slice_wsola(audio, output_samples)
-        self._reset_tempo_state()
+        if self.playback_tempo_algorithm == "rubberband" and input_frames > output_frames:
+            return self._speed_adjust_playback_slice_rubberband(audio, output_samples)
         return self._speed_adjust_playback_slice_resample(audio, output_samples)
 
-    def _speed_adjust_playback_slice_wsola(self, audio: np.ndarray, output_samples: int) -> np.ndarray:
+    def _speed_adjust_playback_slice_rubberband(self, audio: np.ndarray, output_samples: int) -> np.ndarray:
         input_frames = len(audio) // self.device_channels
         output_frames = output_samples // self.device_channels
         if input_frames <= output_frames:
             return self._speed_adjust_playback_slice_resample(audio, output_samples)
-
-        shaped = audio.reshape(input_frames, self.device_channels).astype(np.float32)
         tempo = input_frames / float(output_frames)
-        window_frames = min(
-            input_frames,
-            output_frames,
-            max(64, int(self.device_rate * WSOLA_WINDOW_MS / 1000)),
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg is None:
+            return self._speed_adjust_playback_slice_resample(audio, output_samples)
+
+        filter_spec = (
+            f"rubberband=tempo={tempo:.6f}:pitch=1:"
+            "transients=smooth:detector=soft:phase=laminar:"
+            "window=short:smoothing=on:formant=preserved:"
+            "pitchq=quality:channels=together"
         )
-        hop_out = max(16, window_frames // 2)
-        overlap_frames = window_frames - hop_out
-        search_frames = max(8, int(self.device_rate * WSOLA_SEARCH_MS / 1000))
-        window = np.hanning(window_frames).astype(np.float32)[:, None]
-        if not np.any(window):
-            window = np.ones((window_frames, 1), dtype=np.float32)
-
-        out_len = output_frames + window_frames
-        output = np.zeros((out_len, self.device_channels), dtype=np.float32)
-        weights = np.zeros((out_len, 1), dtype=np.float32)
-        out_pos = 0
-        first = True
-
-        while out_pos < output_frames:
-            expected = int(round(out_pos * tempo))
-            if (
-                first
-                and self.wsola_previous_tail is not None
-                and len(self.wsola_previous_tail) >= overlap_frames
-                and overlap_frames > 0
-            ):
-                previous_mono = np.mean(self.wsola_previous_tail[-overlap_frames:], axis=1)
-                stop = min(max(0, input_frames - window_frames), search_frames)
-                best_score = None
-                in_pos = 0
-                for candidate in range(0, stop + 1, 2):
-                    candidate_mono = np.mean(shaped[candidate : candidate + overlap_frames], axis=1)
-                    diff = previous_mono - candidate_mono
-                    score = float(np.dot(diff, diff))
-                    if best_score is None or score < best_score:
-                        best_score = score
-                        in_pos = candidate
-            elif first or overlap_frames <= 0 or out_pos + overlap_frames > out_len:
-                in_pos = min(expected, max(0, input_frames - window_frames))
-            else:
-                previous = output[out_pos : out_pos + overlap_frames]
-                previous_weight = np.maximum(weights[out_pos : out_pos + overlap_frames], 1.0e-6)
-                previous_mono = np.mean(previous / previous_weight, axis=1)
-                start = max(0, expected - search_frames)
-                stop = min(max(0, input_frames - window_frames), expected + search_frames)
-                best_score = None
-                in_pos = min(expected, max(0, input_frames - window_frames))
-                for candidate in range(start, stop + 1, 2):
-                    candidate_mono = np.mean(shaped[candidate : candidate + overlap_frames], axis=1)
-                    diff = previous_mono - candidate_mono
-                    score = float(np.dot(diff, diff))
-                    if best_score is None or score < best_score:
-                        best_score = score
-                        in_pos = candidate
-
-            segment = shaped[in_pos : in_pos + window_frames]
-            if len(segment) < window_frames:
-                pad = np.zeros((window_frames - len(segment), self.device_channels), dtype=np.float32)
-                segment = np.vstack((segment, pad))
-            end_pos = min(out_len, out_pos + window_frames)
-            segment = segment[: end_pos - out_pos]
-            segment_window = window[: len(segment)]
-            output[out_pos:end_pos] += segment * segment_window
-            weights[out_pos:end_pos] += segment_window
-            out_pos += hop_out
-            first = False
-
-        adjusted = output[:output_frames] / np.maximum(weights[:output_frames], 1.0e-6)
-        if self.wsola_previous_tail is not None and len(adjusted) > 0:
-            crossfade_frames = min(
-                self.wsola_boundary_crossfade_frames,
-                len(self.wsola_previous_tail),
-                len(adjusted),
+        command = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "s16le",
+            "-ar",
+            str(self.device_rate),
+            "-ac",
+            str(self.device_channels),
+            "-i",
+            "pipe:0",
+            "-af",
+            filter_spec,
+            "-f",
+            "s16le",
+            "pipe:1",
+        ]
+        try:
+            completed = subprocess.run(
+                command,
+                input=audio.tobytes(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=2.0,
+                check=True,
             )
-            if crossfade_frames > 1:
-                fade_in = np.linspace(0.0, 1.0, crossfade_frames, dtype=np.float32)[:, None]
-                fade_out = 1.0 - fade_in
-                adjusted[:crossfade_frames] = (
-                    self.wsola_previous_tail[-crossfade_frames:] * fade_out
-                    + adjusted[:crossfade_frames] * fade_in
-                )
-        tail_frames = min(max(overlap_frames, self.wsola_boundary_crossfade_frames), len(adjusted))
-        self.wsola_previous_tail = adjusted[-tail_frames:].copy() if tail_frames > 0 else None
-        return np.clip(np.rint(adjusted), -32768, 32767).astype(np.int16).reshape(-1)
+            adjusted = np.frombuffer(completed.stdout, dtype=np.int16)
+        except Exception:
+            return self._speed_adjust_playback_slice_resample(audio, output_samples)
+
+        if len(adjusted) > output_samples:
+            adjusted = adjusted[:output_samples]
+        elif len(adjusted) < output_samples:
+            adjusted = np.pad(adjusted, (0, output_samples - len(adjusted)))
+        input_peak = int(np.max(np.abs(audio.astype(np.int32)))) if len(audio) else 0
+        output_peak = int(np.max(np.abs(adjusted.astype(np.int32)))) if len(adjusted) else 0
+        if input_peak > 0 and output_peak > input_peak:
+            adjusted = np.rint(adjusted.astype(np.float32) * (input_peak / output_peak)).astype(np.int16)
+        return adjusted.astype(np.int16, copy=False)
 
     def _speed_adjust_playback_slice_resample(self, audio: np.ndarray, output_samples: int) -> np.ndarray:
         input_frames = len(audio) // self.device_channels
@@ -1844,7 +1799,6 @@ class AudioBridge:
                 and len(self.playback_buffer) < self.playback_preroll_samples
                 and first_segment_end is None
             ):
-                self._reset_tempo_state()
                 self._fill_idle_audio(outdata, frames)
             elif len(self.playback_buffer) >= needed:
                 self.playback_started = True
@@ -1856,8 +1810,6 @@ class AudioBridge:
                         max(frames + 1, int(round(frames * tempo))),
                     )
                     consume_samples = consume_frames * self.device_channels
-                if not was_playing:
-                    self._reset_tempo_state()
                 output_audio = self._speed_adjust_playback_slice(
                     self.playback_buffer[:consume_samples],
                     needed,
@@ -1876,12 +1828,10 @@ class AudioBridge:
                 outdata[:] = output_audio.reshape(frames, self.device_channels)
                 self._consume_playback_buffer(first_segment_end)
                 self.playback_started = False
-                self._reset_tempo_state()
             elif was_playing and len(self.playback_buffer) > 0:
                 self.playback_partial_holds += 1
                 self.playback_started = True
                 self.last_playback_underrun = time.monotonic()
-                self._reset_tempo_state()
                 self._fill_idle_audio(outdata, frames)
             else:
                 if was_playing:
@@ -1890,7 +1840,6 @@ class AudioBridge:
                 else:
                     self._increase_playback_preroll()
                     self.playback_started = False
-                self._reset_tempo_state()
                 self._fill_idle_audio(outdata, frames)
 
             if self.callback_output_recorder is not None:
@@ -2958,7 +2907,7 @@ def parse_args():
             DEFAULT_PLAYBACK_TEMPO_ALGORITHM,
             "bridge.playback_tempo_algorithm",
         ),
-        help="Local tempo algorithm: resample changes pitch, wsola preserves pitch better. Overrides config.toml.",
+        help="Local tempo algorithm: resample changes pitch, rubberband preserves pitch better. Overrides config.toml.",
     )
     parser.add_argument(
         "--playback-fade-ms",
