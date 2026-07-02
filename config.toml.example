@@ -21,7 +21,7 @@ hostapi_preference = ["Windows DirectSound", "MME", "Windows WDM-KS"]
 
 [bridge]
 chunk_ms = 320
-input_block_ms = 20
+input_block_ms = 50
 raw_palabra_playback = false
 playback_buffer_ms = 300
 phrase_start_buffer_ms = 1200
@@ -45,3 +45,4 @@ max_tempo = 1.1
 [diagnostics]
 test_seconds = 3.0
 test_volume = 0.5
+record_debug_mp3 = false

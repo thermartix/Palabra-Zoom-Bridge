@@ -8,13 +8,14 @@ import json
 import os
 import queue
 import re
+import shutil
 import signal
+import subprocess
 import sys
 import threading
 import time
 import traceback
 import contextlib
-import wave
 from datetime import datetime
 from fractions import Fraction
 from pathlib import Path
@@ -32,7 +33,7 @@ from scipy.signal import resample_poly
 
 SESSION_URL = "https://api.palabra.ai/session-storage/session"
 SESSIONS_URL = "https://api.palabra.ai/session-storage/sessions"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 CONFIG_PATH = Path("config.toml")
 LOG_DIR = Path("logs")
 CABLE_ROUTE_LOG_PATH = LOG_DIR / "cable_route.log"
@@ -53,7 +54,7 @@ PALABRA_OUTPUT_RATE = 24000
 PALABRA_OUTPUT_CHANNELS = 1
 DEFAULT_DEVICE_CHANNELS = 2
 DEFAULT_CHUNK_MS = 320
-DEFAULT_INPUT_BLOCK_MS = 0
+DEFAULT_INPUT_BLOCK_MS = 50
 DEFAULT_PLAYBACK_BUFFER_MS = 500
 DEFAULT_PHRASE_START_BUFFER_MS = 1800
 DEFAULT_PLAYBACK_MAX_BUFFER_MS = 5000
@@ -76,7 +77,7 @@ DEFAULT_PALABRA_MIN_TEMPO = 1.0
 DEFAULT_PALABRA_MAX_TEMPO = 1.1
 DEFAULT_TEST_SECONDS = 3.0
 DEFAULT_TEST_VOLUME = 0.5
-DEFAULT_RECORD_OUTPUT_WAV = False
+DEFAULT_RECORD_DEBUG_MP3 = False
 DEFAULT_DEVICE_PROBE_SECONDS = 0.15
 PLAYBACK_BUFFER_STEP_MS = 500
 PLAYBACK_ACTIVE_UNDERRUN_STEP_MS = 200
@@ -176,32 +177,58 @@ def write_last_error_log(error: BaseException) -> None:
     write_log_file(LAST_ERROR_LOG_PATH, text, append=False)
 
 
-class WavDebugRecorder:
+class Mp3DebugRecorder:
     def __init__(self, path: Path, sample_rate: int, channels: int) -> None:
         self.path = path
         self.sample_rate = sample_rate
         self.channels = channels
-        self.file: Optional[wave.Wave_write] = None
+        self.process: Optional[subprocess.Popen] = None
         self.lock = threading.Lock()
 
-    def __enter__(self) -> "WavDebugRecorder":
+    def __enter__(self) -> "Mp3DebugRecorder":
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.file = wave.open(str(self.path), "wb")
-        self.file.setnchannels(self.channels)
-        self.file.setsampwidth(2)
-        self.file.setframerate(self.sample_rate)
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg is None:
+            raise RuntimeError("ffmpeg is required for debug MP3 recording. Install ffmpeg or disable recording.")
+        self.process = subprocess.Popen(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "s16le",
+                "-ar",
+                str(self.sample_rate),
+                "-ac",
+                str(self.channels),
+                "-i",
+                "pipe:0",
+                "-codec:a",
+                "libmp3lame",
+                "-b:a",
+                "128k",
+                "-y",
+                str(self.path),
+            ],
+            stdin=subprocess.PIPE,
+        )
         return self
 
     def write(self, audio: np.ndarray) -> None:
-        if self.file is None or len(audio) == 0:
+        if self.process is None or self.process.stdin is None or len(audio) == 0:
             return
         with self.lock:
-            self.file.writeframes(audio.astype(np.int16, copy=False).tobytes())
+            with contextlib.suppress(BrokenPipeError):
+                self.process.stdin.write(audio.astype(np.int16, copy=False).tobytes())
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        if self.file is not None:
-            self.file.close()
-            self.file = None
+        if self.process is not None:
+            if self.process.stdin is not None:
+                with contextlib.suppress(BrokenPipeError):
+                    self.process.stdin.close()
+            self.process.wait()
+            self.process = None
 
 
 @dataclasses.dataclass
@@ -210,13 +237,13 @@ class PlaybackChunk:
     segment_end: bool = False
 
 
-class AsyncWavDebugRecorder(WavDebugRecorder):
+class AsyncMp3DebugRecorder(Mp3DebugRecorder):
     def __init__(self, path: Path, sample_rate: int, channels: int) -> None:
         super().__init__(path, sample_rate, channels)
         self.queue: queue.Queue[Optional[np.ndarray]] = queue.Queue(maxsize=300)
         self.thread: Optional[threading.Thread] = None
 
-    def __enter__(self) -> "AsyncWavDebugRecorder":
+    def __enter__(self) -> "AsyncMp3DebugRecorder":
         super().__enter__()
 
         def run() -> None:
@@ -224,14 +251,14 @@ class AsyncWavDebugRecorder(WavDebugRecorder):
                 audio = self.queue.get()
                 if audio is None:
                     break
-                super(AsyncWavDebugRecorder, self).write(audio)
+                super(AsyncMp3DebugRecorder, self).write(audio)
 
         self.thread = threading.Thread(target=run, daemon=True)
         self.thread.start()
         return self
 
     def write(self, audio: np.ndarray) -> None:
-        if self.file is None or len(audio) == 0:
+        if self.process is None or len(audio) == 0:
             return
         with contextlib.suppress(queue.Full):
             self.queue.put_nowait(audio.astype(np.int16, copy=True))
@@ -1106,6 +1133,27 @@ def config_bool(section: dict, key: str, default: bool, dotted_name: str) -> boo
     return value
 
 
+def config_bool_with_aliases(
+    section: dict,
+    key: str,
+    default: bool,
+    dotted_name: str,
+    *,
+    aliases: tuple[str, ...] = (),
+) -> bool:
+    value = section.get(key)
+    if value is None:
+        for alias in aliases:
+            value = section.get(alias)
+            if value is not None:
+                break
+    if value is None:
+        value = default
+    if not isinstance(value, bool):
+        raise SystemExit(f"{dotted_name} in config.toml must be true or false.")
+    return value
+
+
 def resolve_translation_settings(args) -> tuple[str, str, Optional[str]]:
     source_language = args.source_language
     target_language = args.target_language
@@ -1210,9 +1258,10 @@ class AudioBridge:
         self.playback_status_count = 0
         self.output_audio_chunks = 0
         self.dumped_palabra_message_types: set[str] = set()
-        self.api_output_recorder: Optional[WavDebugRecorder] = None
-        self.device_output_recorder: Optional[WavDebugRecorder] = None
-        self.callback_output_recorder: Optional[AsyncWavDebugRecorder] = None
+        self.api_input_recorder: Optional[Mp3DebugRecorder] = None
+        self.api_output_recorder: Optional[Mp3DebugRecorder] = None
+        self.device_output_recorder: Optional[Mp3DebugRecorder] = None
+        self.callback_output_recorder: Optional[AsyncMp3DebugRecorder] = None
         self.first_source_transcription_time: Optional[float] = None
         self.last_no_output_warning = 0.0
         self.last_capture_drop_notice = 0.0
@@ -1599,16 +1648,8 @@ class AudioBridge:
                 self.playback_started = False
             elif was_playing and len(self.playback_buffer) > 0:
                 self.playback_partial_holds += 1
-                now = time.monotonic()
-                if now - self.last_playback_hold_notice >= 5:
-                    held_ms = len(self.playback_buffer) / max(1, self.device_rate * self.device_channels) * 1000
-                    print(
-                        f"[playback] waiting for more translated audio; holding {held_ms:.0f} ms partial block",
-                        flush=True,
-                    )
-                    self.last_playback_hold_notice = now
                 self.playback_started = True
-                self.last_playback_underrun = now
+                self.last_playback_underrun = time.monotonic()
                 self._fill_idle_audio(outdata, frames)
             else:
                 if was_playing:
@@ -1628,6 +1669,7 @@ class AudioBridge:
             channels=self.device_channels,
             dtype="int16",
             blocksize=self.input_blocksize,
+            latency="high",
             callback=callback,
         )
         try:
@@ -1659,6 +1701,8 @@ class AudioBridge:
                 now = time.monotonic()
                 if next_send_time > now:
                     await asyncio.sleep(next_send_time - now)
+                if self.api_input_recorder is not None:
+                    self.api_input_recorder.write(chunk)
                 await websocket.send(
                     json.dumps(
                         {
@@ -2034,9 +2078,10 @@ async def run(args) -> None:
     bridge: Optional[AudioBridge] = None
     capture_thread: Optional[threading.Thread] = None
     playback_stream: Optional[sd.OutputStream] = None
-    api_output_recorder: Optional[WavDebugRecorder] = None
-    device_output_recorder: Optional[WavDebugRecorder] = None
-    callback_output_recorder: Optional[AsyncWavDebugRecorder] = None
+    api_input_recorder: Optional[Mp3DebugRecorder] = None
+    api_output_recorder: Optional[Mp3DebugRecorder] = None
+    device_output_recorder: Optional[Mp3DebugRecorder] = None
+    callback_output_recorder: Optional[AsyncMp3DebugRecorder] = None
     try:
         try:
             bridge, capture_thread, playback_stream = start_audio_with_fallback(
@@ -2044,29 +2089,36 @@ async def run(args) -> None:
                 source_language,
                 target_language,
             )
-            if args.record_output_wav:
+            if args.record_debug_mp3:
                 timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-                api_output_recorder = WavDebugRecorder(
-                    Path("debug") / f"palabra_output_api_{timestamp}.wav",
+                api_input_recorder = Mp3DebugRecorder(
+                    Path("debug") / f"palabra_input_api_{timestamp}.mp3",
+                    args.api_rate,
+                    args.channels,
+                ).__enter__()
+                api_output_recorder = Mp3DebugRecorder(
+                    Path("debug") / f"palabra_output_api_{timestamp}.mp3",
                     PALABRA_OUTPUT_RATE,
                     PALABRA_OUTPUT_CHANNELS,
                 ).__enter__()
-                device_output_recorder = WavDebugRecorder(
-                    Path("debug") / f"zoom_mic_output_{timestamp}.wav",
+                device_output_recorder = Mp3DebugRecorder(
+                    Path("debug") / f"zoom_mic_output_{timestamp}.mp3",
                     args.device_rate,
                     args.device_channels,
                 ).__enter__()
-                callback_output_recorder = AsyncWavDebugRecorder(
-                    Path("debug") / f"zoom_mic_callback_{timestamp}.wav",
+                callback_output_recorder = AsyncMp3DebugRecorder(
+                    Path("debug") / f"zoom_mic_callback_{timestamp}.mp3",
                     args.device_rate,
                     args.device_channels,
                 ).__enter__()
+                bridge.api_input_recorder = api_input_recorder
                 bridge.api_output_recorder = api_output_recorder
                 bridge.device_output_recorder = device_output_recorder
                 bridge.callback_output_recorder = callback_output_recorder
-                print(f"Recording Palabra output WAV: {api_output_recorder.path}")
-                print(f"Recording Zoom mic output WAV: {device_output_recorder.path}")
-                print(f"Recording exact callback output WAV: {callback_output_recorder.path}")
+                print(f"Recording Palabra input MP3: {api_input_recorder.path}")
+                print(f"Recording Palabra output MP3: {api_output_recorder.path}")
+                print(f"Recording Zoom mic output MP3: {device_output_recorder.path}")
+                print(f"Recording exact callback output MP3: {callback_output_recorder.path}")
 
             session = await create_session(client_id, client_secret)
             session_data = session["data"]
@@ -2196,9 +2248,12 @@ async def run(args) -> None:
             with contextlib.suppress(Exception):
                 playback_stream.close()
         if bridge is not None:
+            bridge.api_input_recorder = None
             bridge.api_output_recorder = None
             bridge.device_output_recorder = None
             bridge.callback_output_recorder = None
+        if api_input_recorder is not None:
+            api_input_recorder.__exit__(None, None, None)
         if api_output_recorder is not None:
             api_output_recorder.__exit__(None, None, None)
         if device_output_recorder is not None:
@@ -2249,15 +2304,19 @@ def parse_args():
         help="Tone volume from 0.0 to 1.0.",
     )
     parser.add_argument(
+        "--record-debug-mp3",
+        "--record-output-mp3",
         "--record-output-wav",
+        dest="record_debug_mp3",
         action="store_true",
-        default=config_bool(
+        default=config_bool_with_aliases(
             diagnostics,
-            "record_output_wav",
-            DEFAULT_RECORD_OUTPUT_WAV,
-            "diagnostics.record_output_wav",
+            "record_debug_mp3",
+            DEFAULT_RECORD_DEBUG_MP3,
+            "diagnostics.record_debug_mp3",
+            aliases=("record_output_mp3", "record_output_wav"),
         ),
-        help="Record translated output WAV files into debug/ for audio-quality analysis.",
+        help="Record bridge input/output MP3 files into debug/ for audio-quality analysis.",
     )
     parser.add_argument(
         "--dump-palabra-messages",

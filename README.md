@@ -1,6 +1,6 @@
 # Palabra Zoom Bridge
 
-Version: 0.2.0
+Version: 0.3.0
 
 Local MVP bridge for one Zoom interpretation channel:
 
@@ -11,9 +11,10 @@ Zoom Spanish audio -> VB cable -> Python bridge -> Palabra -> VB cable -> Zoom G
 ## 1. Install Python dependencies
 
 ```powershell
-py -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+& "C:\Users\marti\.venvs\palabra_zoom\Scripts\python.exe" -m pip install -r requirements.txt
 ```
+
+Install `ffmpeg` and make sure it is available on `PATH` if you want MP3 debug recordings.
 
 ## 2. Configure Palabra credentials
 
@@ -56,7 +57,7 @@ hostapi_preference = ["Windows DirectSound", "MME", "Windows WDM-KS"]
 
 [bridge]
 chunk_ms = 320
-input_block_ms = 0
+input_block_ms = 50
 playback_buffer_ms = 500
 playback_fade_ms = 5
 idle_noise_amplitude = 0
@@ -66,11 +67,13 @@ task_ready_timeout_seconds = 30.0
 task_poll_seconds = 2.0
 end_task_eos_timeout_seconds = 2.0
 graceful_shutdown_timeout_seconds = 6.0
+playback_drain_timeout_seconds = 30.0
 
 [palabra]
 segment_confirmation_silence_threshold = 0.3
 only_confirm_by_silence = false
 sentence_splitter_enabled = true
+translate_partial_transcriptions = true
 desired_queue_level_ms = 2000
 max_queue_level_ms = 5000
 auto_tempo = true
@@ -80,7 +83,7 @@ max_tempo = 1.1
 [diagnostics]
 test_seconds = 3.0
 test_volume = 0.5
-record_output_wav = false
+record_debug_mp3 = false
 ```
 
 `voice_id` is optional. When set, the bridge passes it through to Palabra speech generation for the interpreted audio.
@@ -103,7 +106,7 @@ Device settings can be name substrings like `"CABLE-B Input"` or exact numeric i
 
 The bridge ranks complete cable pairs by `audio.hostapi_preference`, then chooses the matching opposite cable ends on the same audio host API. WASAPI is blocked in the script for this bot PC. On this machine, WASAPI fails while starting the VB-Cable stream with a Windows WDM/KS `DeviceIoControl` error `GLE=0x490`, which means Windows could not find the requested driver property/element for that endpoint.
 
-`input_block_ms = 0` lets PortAudio choose the callback block size requested by the selected Windows audio backend. Set a positive value only if you specifically need fixed-size PortAudio callbacks.
+`input_block_ms` controls the bridge input callback size. The default `50` ms keeps callbacks regular without making the capture path too chatty.
 
 In normal use, leave `input_device` and `output_device` commented out. They are only direct overrides for troubleshooting.
 
@@ -112,7 +115,7 @@ You can override any of these defaults on the command line for a single run, for
 ## 4. List audio devices
 
 ```powershell
-.\.venv\Scripts\python.exe palabra_zoom.py --list-devices
+& "C:\Users\marti\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --list-devices
 ```
 
 Look for the VB-Audio devices. You should see each virtual cable on more than one Windows audio backend, usually including `Windows DirectSound`, `MME`, and sometimes `Windows WDM-KS`. WASAPI may also appear, but this bridge blocks it on this bot PC.
@@ -146,7 +149,7 @@ The bridge records from the matching recording side:
 With Zoom open on the bot account, set Zoom's microphone to `CABLE-A Output`, then play a test tone into that cable:
 
 ```powershell
-.\.venv\Scripts\python.exe palabra_zoom.py --test-output "CABLE-A Input"
+& "C:\Users\marti\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --test-output "CABLE-A Input"
 ```
 
 Zoom's microphone meter should move.
@@ -154,7 +157,7 @@ Zoom's microphone meter should move.
 Next, set Zoom's speaker to `CABLE-B Input`, play meeting audio in Zoom, and meter the matching recording side:
 
 ```powershell
-.\.venv\Scripts\python.exe palabra_zoom.py --meter-input "CABLE-B Output"
+& "C:\Users\marti\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --meter-input "CABLE-B Output"
 ```
 
 The level meter should move when Spanish audio is audible in Zoom.
@@ -162,13 +165,19 @@ The level meter should move when Spanish audio is audible in Zoom.
 ## 7. Start the bridge
 
 ```powershell
-.\.venv\Scripts\python.exe palabra_zoom.py
+& "C:\Users\marti\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py
+```
+
+To start the bridge with MP3 debug recording enabled for this run:
+
+```powershell
+& "C:\Users\marti\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --record-debug-mp3
 ```
 
 To test audio-device selection without starting a Palabra session:
 
 ```powershell
-.\.venv\Scripts\python.exe palabra_zoom.py --check-devices
+& "C:\Users\marti\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --check-devices
 ```
 
 The bridge writes debugging files to `logs/`:
@@ -176,20 +185,20 @@ The bridge writes debugging files to `logs/`:
 - `cable_route.log` keeps a timestamped history of the selected cable route and final bridge devices.
 - `last_error.txt` is overwritten with the latest startup/runtime error so the details survive if the terminal window closes.
 
-To diagnose noisy interpreted audio, run with `--record-output-wav` or set `diagnostics.record_output_wav = true`. The bridge writes timestamped WAV files to `debug/`: Palabra's mono output, the stereo audio queued for Zoom's microphone cable, and the exact callback buffers sent to PortAudio, including any inserted silence. If the queued Zoom microphone WAV is clean but the callback WAV has gaps, the bridge is receiving good audio but the real-time playback buffer is starving before Zoom receives it.
+To diagnose noisy interpreted audio, run with `--record-debug-mp3` or set `diagnostics.record_debug_mp3 = true`. The bridge writes timestamped MP3 files to `debug/`: the mono input sent to Palabra, Palabra's mono output, the stereo audio queued for Zoom's microphone cable, and the exact callback buffers sent to PortAudio, including any inserted silence. If the queued Zoom microphone MP3 is clean but the callback MP3 has gaps, the bridge is receiving good audio but the real-time playback buffer is starving before Zoom receives it. The older `--record-output-wav` flag and `diagnostics.record_output_wav` setting are still accepted as compatibility aliases, but recordings are written as MP3.
 
 To check whether Palabra is sending timing or phrase metadata with the stream, add `--dump-palabra-messages` for one short test run. It prints the first payload shape for each message type and replaces base64 audio with a length marker.
 
 Override configured values for a single run:
 
 ```powershell
-.\.venv\Scripts\python.exe palabra_zoom.py --input-device "CABLE-B Output" --output-device "CABLE-A Input" --source-language es --target-language en
+& "C:\Users\marti\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --input-device "CABLE-B Output" --output-device "CABLE-A Input" --source-language es --target-language en
 ```
 
 If device names are ambiguous, use numeric ids from `--list-devices`:
 
 ```powershell
-.\.venv\Scripts\python.exe palabra_zoom.py --input-device <input-id> --output-device <output-id>
+& "C:\Users\marti\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --input-device <input-id> --output-device <output-id>
 ```
 
 ## 8. Zoom meeting flow
