@@ -228,6 +228,10 @@ std::wstring ResolveAuthToken() {
     return EnvWide(L"ZOOM_SDK_AUTH_TOKEN");
 }
 
+std::wstring ResolveAppPrivilegeToken() {
+    return EnvWide(L"ZOOM_SDK_APP_PRIVILEGE_TOKEN");
+}
+
 std::wstring ResolveMeetingNumber() {
     return EnvWide(L"ZOOM_SDK_MEETING_NUMBER");
 }
@@ -758,14 +762,14 @@ int RunSdkProbe(const std::vector<std::wstring>& args, bool initialize, bool aut
 
                 std::wstring displayName = ResolveDisplayName();
                 std::wstring password = ResolveMeetingPassword();
-                std::wstring token = ResolveAuthToken();
+                std::wstring appPrivilegeToken = ResolveAppPrivilegeToken();
                 JoinParam joinParam;
                 joinParam.userType = SDK_UT_WITHOUT_LOGIN;
                 JoinParam4WithoutLogin& withoutLogin = joinParam.param.withoutloginuserJoin;
                 withoutLogin.meetingNumber = meetingNumber;
                 withoutLogin.userName = displayName.c_str();
                 withoutLogin.psw = password.empty() ? nullptr : password.c_str();
-                withoutLogin.app_privilege_token = token.c_str();
+                withoutLogin.app_privilege_token = appPrivilegeToken.empty() ? nullptr : appPrivilegeToken.c_str();
                 withoutLogin.isVideoOff = true;
                 withoutLogin.isAudioOff = true;
                 withoutLogin.isMyVoiceInMix = false;

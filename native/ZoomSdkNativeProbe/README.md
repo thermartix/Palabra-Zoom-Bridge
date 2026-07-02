@@ -14,6 +14,8 @@ Current state:
 - `--sdk-join` authenticates, creates the meeting service, and attempts to join
   `ZOOM_SDK_MEETING_NUMBER`. Waiting room and waiting-for-host count as usable
   join states for this probe.
+- `ZOOM_SDK_APP_PRIVILEGE_TOKEN` can be set when Zoom requires a separate app
+  privilege token. The SDK auth JWT is not used for that join field.
 - Raw audio subscription and interpreter/talkback output are the next steps after
   a real meeting join succeeds.
 
