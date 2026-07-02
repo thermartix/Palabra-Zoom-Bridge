@@ -28,6 +28,7 @@ phrase_start_buffer_ms = 1200
 playback_tempo = 1.075
 playback_max_tempo = 1.15
 playback_tempo_algorithm = "resample"
+playback_fade_ms = 5
 output_peak_limit = 0.65
 startup_delay = 0.0
 task_ready_timeout_seconds = 30.0

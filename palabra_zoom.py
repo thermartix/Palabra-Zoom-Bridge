@@ -39,7 +39,7 @@ from scipy.signal import resample_poly
 SESSION_URL = "https://api.palabra.ai/session-storage/session"
 SESSIONS_URL = "https://api.palabra.ai/session-storage/sessions"
 APP_NAME = "Palabra Zoom Bridge"
-__version__ = "0.3.17"
+__version__ = "0.3.18"
 APP_VERSION = __version__
 CONFIG_PATH = Path("config.toml")
 LOG_DIR = Path("logs")
@@ -1448,6 +1448,42 @@ class AudioBridge:
                 return offset
         return None
 
+    def _append_playback_buffer_chunk(
+        self,
+        chunks: list[np.ndarray],
+        buffered_samples: int,
+        chunk_audio: np.ndarray,
+    ) -> int:
+        if len(chunk_audio) == 0:
+            return buffered_samples
+
+        previous_audio = chunks[-1] if chunks else np.array([], dtype=np.int16)
+        at_segment_boundary = any(offset == buffered_samples for offset in self.playback_segment_end_offsets)
+        fade_frames = min(
+            self.playback_fade_frames,
+            len(previous_audio) // self.device_channels,
+            len(chunk_audio) // self.device_channels,
+        )
+        if self.raw_palabra_playback or at_segment_boundary or fade_frames <= 1:
+            chunks.append(chunk_audio)
+            return buffered_samples + len(chunk_audio)
+
+        fade_samples = fade_frames * self.device_channels
+        previous_copy = previous_audio.copy()
+        chunk_copy = chunk_audio.copy()
+        previous_frames = previous_copy.reshape(-1, self.device_channels)
+        chunk_frames = chunk_copy.reshape(-1, self.device_channels)
+        ramp_in = np.linspace(0.0, 1.0, fade_frames, dtype=np.float32)[:, None]
+        ramp_out = 1.0 - ramp_in
+        blended = (
+            previous_frames[-fade_frames:].astype(np.float32) * ramp_out
+            + chunk_frames[:fade_frames].astype(np.float32) * ramp_in
+        )
+        previous_frames[-fade_frames:] = np.rint(blended).astype(np.int16)
+        chunks[-1] = previous_copy
+        chunks.append(chunk_copy[fade_samples:])
+        return buffered_samples + len(chunk_copy) - fade_samples
+
     def _queue_playback_chunk(self, audio: np.ndarray, segment_end: bool, force: bool = False) -> None:
         if len(audio) == 0 and not segment_end:
             return
@@ -1824,8 +1860,7 @@ class AudioBridge:
                 except queue.Empty:
                     break
                 chunk_audio = next_chunk.audio
-                chunks.append(chunk_audio)
-                buffered_samples += len(chunk_audio)
+                buffered_samples = self._append_playback_buffer_chunk(chunks, buffered_samples, chunk_audio)
                 if next_chunk.segment_end:
                     self.playback_segment_end_offsets.append(buffered_samples)
 
@@ -1837,8 +1872,7 @@ class AudioBridge:
                     except queue.Empty:
                         break
                     chunk_audio = next_chunk.audio
-                    chunks.append(chunk_audio)
-                    buffered_samples += len(chunk_audio)
+                    buffered_samples = self._append_playback_buffer_chunk(chunks, buffered_samples, chunk_audio)
                     if next_chunk.segment_end:
                         self.playback_segment_end_offsets.append(buffered_samples)
                         break
