@@ -33,7 +33,7 @@ from scipy.signal import resample_poly
 
 SESSION_URL = "https://api.palabra.ai/session-storage/session"
 SESSIONS_URL = "https://api.palabra.ai/session-storage/sessions"
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.3.1"
 CONFIG_PATH = Path("config.toml")
 LOG_DIR = Path("logs")
 CABLE_ROUTE_LOG_PATH = LOG_DIR / "cable_route.log"
@@ -275,6 +275,38 @@ class AsyncMp3DebugRecorder(Mp3DebugRecorder):
             self.thread.join(timeout=2)
             self.thread = None
         super().__exit__(exc_type, exc, tb)
+
+
+class DebugTextLogger:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.file = None
+        self.lock = threading.Lock()
+        self.started_at = time.monotonic()
+
+    def __enter__(self) -> "DebugTextLogger":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.file = self.path.open("w", encoding="utf-8")
+        self.write("debug_log_start", timestamp=log_timestamp())
+        return self
+
+    def write(self, event: str, **fields) -> None:
+        if self.file is None:
+            return
+        elapsed = time.monotonic() - self.started_at
+        field_text = " ".join(f"{key}={json.dumps(value, ensure_ascii=False)}" for key, value in fields.items())
+        line = f"{elapsed:10.3f}s {event}"
+        if field_text:
+            line = f"{line} {field_text}"
+        with self.lock:
+            self.file.write(line + "\n")
+            self.file.flush()
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self.file is not None:
+            self.write("debug_log_stop", timestamp=log_timestamp())
+            self.file.close()
+            self.file = None
 
 
 def keep_windows_awake() -> bool:
@@ -1179,6 +1211,19 @@ def first_text_value(data: dict, *container_keys: str) -> str:
     return ""
 
 
+def compact_palabra_ids(data: dict) -> dict:
+    return {
+        key: data.get(key)
+        for key in (
+            "transcription_id",
+            "translation_part_id",
+            "language",
+            "last_chunk",
+        )
+        if key in data
+    }
+
+
 class AudioBridge:
     def __init__(
         self,
@@ -1262,6 +1307,7 @@ class AudioBridge:
         self.api_output_recorder: Optional[Mp3DebugRecorder] = None
         self.device_output_recorder: Optional[Mp3DebugRecorder] = None
         self.callback_output_recorder: Optional[AsyncMp3DebugRecorder] = None
+        self.debug_text_logger: Optional[DebugTextLogger] = None
         self.first_source_transcription_time: Optional[float] = None
         self.last_no_output_warning = 0.0
         self.last_capture_drop_notice = 0.0
@@ -1765,6 +1811,17 @@ class AudioBridge:
                 api_audio = np.frombuffer(base64.b64decode(encoded_audio), dtype=np.int16)
                 if self.api_output_recorder is not None:
                     self.api_output_recorder.write(api_audio)
+                if self.debug_text_logger is not None:
+                    self.debug_text_logger.write(
+                        "output_audio_chunk",
+                        duration_ms=round(
+                            len(api_audio) / max(1, self.output_api_rate * self.output_api_channels) * 1000,
+                            1,
+                        ),
+                        samples=len(api_audio),
+                        text=first_text_value(transcription, "translation", "translations", "transcription"),
+                        **compact_palabra_ids(transcription),
+                    )
                 device_audio = resample_int16(api_audio, self.output_api_rate, self.device_rate, gain=self.output_gain)
                 device_audio = convert_channels_int16(
                     device_audio,
@@ -1784,6 +1841,13 @@ class AudioBridge:
                 text = first_text_value(data, "transcription")
                 if text:
                     print(f"[{language_label(source_language)}] {text}")
+                    if self.debug_text_logger is not None:
+                        self.debug_text_logger.write(
+                            "validated_transcription",
+                            configured_language=source_language,
+                            text=text,
+                            **compact_palabra_ids(data),
+                        )
                     now = time.monotonic()
                     if self.first_source_transcription_time is None:
                         self.first_source_transcription_time = now
@@ -1798,17 +1862,46 @@ class AudioBridge:
                             flush=True,
                         )
                         self.last_no_output_warning = now
+            elif msg_type == "partial_transcription":
+                text = first_text_value(data, "transcription")
+                if text and self.debug_text_logger is not None:
+                    self.debug_text_logger.write(
+                        "partial_transcription",
+                        configured_language=source_language,
+                        text=text,
+                        **compact_palabra_ids(data),
+                    )
             elif msg_type == "translated_transcription":
                 text = first_text_value(data, "translation", "translations")
                 if text:
                     print(f"[{language_label(target_language)}] {text}")
+                    if self.debug_text_logger is not None:
+                        self.debug_text_logger.write(
+                            "translated_transcription",
+                            configured_language=target_language,
+                            text=text,
+                            **compact_palabra_ids(data),
+                        )
+            elif msg_type == "partial_translated_transcription":
+                text = first_text_value(data, "translation", "translations")
+                if text and self.debug_text_logger is not None:
+                    self.debug_text_logger.write(
+                        "partial_translated_transcription",
+                        configured_language=target_language,
+                        text=text,
+                        **compact_palabra_ids(data),
+                    )
             elif msg_type == "warning":
                 print(f"[palabra warning] {format_palabra_message_details(data)}", flush=True)
+                if self.debug_text_logger is not None:
+                    self.debug_text_logger.write("warning", details=format_palabra_message_details(data))
             elif msg_type == "current_task":
                 continue
             elif msg_type == "eos":
                 self._release_pending_playback_phrase(segment_end=True)
                 print("[palabra] End of stream received.", flush=True)
+                if self.debug_text_logger is not None:
+                    self.debug_text_logger.write("eos")
                 return
             elif msg_type == "error":
                 raise PalabraRuntimeError(format_palabra_message_details(data))
@@ -2082,6 +2175,7 @@ async def run(args) -> None:
     api_output_recorder: Optional[Mp3DebugRecorder] = None
     device_output_recorder: Optional[Mp3DebugRecorder] = None
     callback_output_recorder: Optional[AsyncMp3DebugRecorder] = None
+    debug_text_logger: Optional[DebugTextLogger] = None
     try:
         try:
             bridge, capture_thread, playback_stream = start_audio_with_fallback(
@@ -2111,14 +2205,19 @@ async def run(args) -> None:
                     args.device_rate,
                     args.device_channels,
                 ).__enter__()
+                debug_text_logger = DebugTextLogger(
+                    Path("debug") / f"palabra_text_events_{timestamp}.txt",
+                ).__enter__()
                 bridge.api_input_recorder = api_input_recorder
                 bridge.api_output_recorder = api_output_recorder
                 bridge.device_output_recorder = device_output_recorder
                 bridge.callback_output_recorder = callback_output_recorder
+                bridge.debug_text_logger = debug_text_logger
                 print(f"Recording Palabra input MP3: {api_input_recorder.path}")
                 print(f"Recording Palabra output MP3: {api_output_recorder.path}")
                 print(f"Recording Zoom mic output MP3: {device_output_recorder.path}")
                 print(f"Recording exact callback output MP3: {callback_output_recorder.path}")
+                print(f"Recording Palabra text events: {debug_text_logger.path}")
 
             session = await create_session(client_id, client_secret)
             session_data = session["data"]
@@ -2252,6 +2351,9 @@ async def run(args) -> None:
             bridge.api_output_recorder = None
             bridge.device_output_recorder = None
             bridge.callback_output_recorder = None
+            bridge.debug_text_logger = None
+        if debug_text_logger is not None:
+            debug_text_logger.__exit__(None, None, None)
         if api_input_recorder is not None:
             api_input_recorder.__exit__(None, None, None)
         if api_output_recorder is not None:

@@ -1,6 +1,6 @@
 # Palabra Zoom Bridge
 
-Version: 0.3.0
+Version: 0.3.1
 
 Local MVP bridge for one Zoom interpretation channel:
 
@@ -185,7 +185,7 @@ The bridge writes debugging files to `logs/`:
 - `cable_route.log` keeps a timestamped history of the selected cable route and final bridge devices.
 - `last_error.txt` is overwritten with the latest startup/runtime error so the details survive if the terminal window closes.
 
-To diagnose noisy interpreted audio, run with `--record-debug-mp3` or set `diagnostics.record_debug_mp3 = true`. The bridge writes timestamped MP3 files to `debug/`: the mono input sent to Palabra, Palabra's mono output, the stereo audio queued for Zoom's microphone cable, and the exact callback buffers sent to PortAudio, including any inserted silence. If the queued Zoom microphone MP3 is clean but the callback MP3 has gaps, the bridge is receiving good audio but the real-time playback buffer is starving before Zoom receives it. The older `--record-output-wav` flag and `diagnostics.record_output_wav` setting are still accepted as compatibility aliases, but recordings are written as MP3.
+To diagnose noisy interpreted audio, run with `--record-debug-mp3` or set `diagnostics.record_debug_mp3 = true`. The bridge writes timestamped debug files to `debug/`: MP3 files for the mono input sent to Palabra, Palabra's mono output, the stereo audio queued for Zoom's microphone cable, and the exact callback buffers sent to PortAudio, including any inserted silence. It also writes `palabra_text_events_*.txt`, with timestamped partial/final transcription events and output audio chunk metadata, so you can compare what Palabra recognized against the sound chunks it returned. If the queued Zoom microphone MP3 is clean but the callback MP3 has gaps, the bridge is receiving good audio but the real-time playback buffer is starving before Zoom receives it. The older `--record-output-wav` flag and `diagnostics.record_output_wav` setting are still accepted as compatibility aliases, but recordings are written as MP3.
 
 To check whether Palabra is sending timing or phrase metadata with the stream, add `--dump-palabra-messages` for one short test run. It prints the first payload shape for each message type and replaces base64 audio with a length marker.
 
