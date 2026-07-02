@@ -39,7 +39,7 @@ from scipy.signal import resample_poly
 SESSION_URL = "https://api.palabra.ai/session-storage/session"
 SESSIONS_URL = "https://api.palabra.ai/session-storage/sessions"
 APP_NAME = "Palabra Zoom Bridge"
-__version__ = "0.3.9"
+__version__ = "0.3.10"
 APP_VERSION = __version__
 CONFIG_PATH = Path("config.toml")
 LOG_DIR = Path("logs")
@@ -93,6 +93,7 @@ PLAYBACK_SILENCE_RMS = 120.0
 PLAYBACK_START_LOOKAHEAD_MS = 2500
 PLAYBACK_CATCHUP_TARGET_MS = 1200
 PLAYBACK_CATCHUP_FULL_BACKLOG_MS = 4000
+DEFAULT_PLAYBACK_TEMPO = 1.0
 DEFAULT_PLAYBACK_MAX_LOCAL_TEMPO = 1.06
 DEFAULT_PLAYBACK_FADE_MS = 5
 DEFAULT_IDLE_NOISE_AMPLITUDE = 96
@@ -1063,8 +1064,12 @@ def validate_runtime_args(args) -> None:
         raise SystemExit("bridge.playback_buffer_ms must be zero or greater.")
     if args.phrase_start_buffer_ms < 0:
         raise SystemExit("bridge.phrase_start_buffer_ms must be zero or greater.")
+    if args.playback_tempo < 1.0:
+        raise SystemExit("bridge.playback_tempo must be 1.0 or greater.")
     if args.playback_max_tempo < 1.0:
         raise SystemExit("bridge.playback_max_tempo must be 1.0 or greater.")
+    if args.playback_max_tempo < args.playback_tempo:
+        raise SystemExit("bridge.playback_max_tempo must be greater than or equal to bridge.playback_tempo.")
     if args.task_ready_timeout <= 0:
         raise SystemExit("bridge.task_ready_timeout_seconds must be greater than 0.")
     if args.task_poll_seconds <= 0:
@@ -1287,6 +1292,7 @@ class AudioBridge:
         input_block_ms: int,
         playback_buffer_ms: int,
         phrase_start_buffer_ms: int,
+        playback_tempo: float,
         playback_max_tempo: float,
         playback_fade_ms: int,
         idle_noise_amplitude: int,
@@ -1327,6 +1333,7 @@ class AudioBridge:
         self.playback_catchup_full_backlog_samples = (
             int(device_rate * PLAYBACK_CATCHUP_FULL_BACKLOG_MS / 1000) * device_channels
         )
+        self.playback_tempo = max(1.0, float(playback_tempo))
         self.playback_max_tempo = max(1.0, float(playback_max_tempo))
         self.playback_fade_frames = max(1, int(device_rate * playback_fade_ms / 1000))
         noise_frames = max(device_rate, self.playback_fade_frames)
@@ -1519,10 +1526,10 @@ class AudioBridge:
         target_samples = max(self.playback_preroll_samples, self.playback_catchup_target_samples)
         backlog_samples = max(0, len(self.playback_buffer) - target_samples)
         if backlog_samples <= 0:
-            return 1.0
+            return self.playback_tempo
         ramp_samples = max(self.device_channels, self.playback_catchup_full_backlog_samples)
         catchup = min(1.0, backlog_samples / float(ramp_samples))
-        return 1.0 + ((self.playback_max_tempo - 1.0) * catchup)
+        return self.playback_tempo + ((self.playback_max_tempo - self.playback_tempo) * catchup)
 
     def _speed_adjust_playback_slice(self, audio: np.ndarray, output_samples: int) -> np.ndarray:
         if len(audio) == output_samples:
@@ -2102,6 +2109,7 @@ def build_audio_bridge(args) -> AudioBridge:
         input_block_ms=args.input_block_ms,
         playback_buffer_ms=args.playback_buffer_ms,
         phrase_start_buffer_ms=args.phrase_start_buffer_ms,
+        playback_tempo=args.playback_tempo,
         playback_max_tempo=args.playback_max_tempo,
         playback_fade_ms=args.playback_fade_ms,
         idle_noise_amplitude=args.idle_noise_amplitude,
@@ -2793,6 +2801,17 @@ def parse_args():
             "bridge.phrase_start_buffer_ms",
         ),
         help="Audio to collect for a phrase before releasing partial Palabra output. Overrides config.toml.",
+    )
+    parser.add_argument(
+        "--playback-tempo",
+        type=float,
+        default=config_float(
+            bridge,
+            "playback_tempo",
+            DEFAULT_PLAYBACK_TEMPO,
+            "bridge.playback_tempo",
+        ),
+        help="Normal local playback speed for translated audio. Overrides config.toml.",
     )
     parser.add_argument(
         "--playback-max-tempo",
