@@ -36,6 +36,9 @@ graceful_shutdown_timeout_seconds = 6.0
 playback_drain_timeout_seconds = 30.0
 
 [palabra]
+# These segmentation settings favor complete returned audio over low latency.
+# Changing them can make Palabra split or replace speech segments
+# unpredictably, which may cause missing words/audio chunks.
 segment_confirmation_silence_threshold = 0.8
 only_confirm_by_silence = true
 sentence_splitter_enabled = false

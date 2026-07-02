@@ -1,6 +1,6 @@
 # Palabra Zoom Bridge
 
-Version: 0.3.13
+Version: 0.3.14
 
 Local MVP bridge for one Zoom interpretation channel:
 
@@ -73,6 +73,9 @@ graceful_shutdown_timeout_seconds = 6.0
 playback_drain_timeout_seconds = 30.0
 
 [palabra]
+# These segmentation settings favor complete returned audio over low latency.
+# Changing them can make Palabra split or replace speech segments
+# unpredictably, which may cause missing words/audio chunks.
 segment_confirmation_silence_threshold = 0.8
 only_confirm_by_silence = true
 sentence_splitter_enabled = false
@@ -99,7 +102,7 @@ record_debug_mp3 = false
 
 `startup_delay` is now only an optional extra settle delay after Palabra reports `current_task`; normal startup readiness is driven by `get_task` polling. Manual Ctrl+C shutdown sends Palabra `end_task` and waits briefly for EOS so the last interpreted phrase can drain. Zoom meeting-ended shutdown closes immediately because there is no meeting audio path left.
 
-The `[palabra]` section is tuned to favor complete returned audio over the lowest possible latency. `segment_confirmation_silence_threshold` controls how much silence Palabra waits for before confirming a segment; lower values reduce long waits but can split phrases earlier. `only_confirm_by_silence` and `sentence_splitter_enabled = false` make Palabra wait for clearer phrase boundaries. `translate_partial_transcriptions = false` avoids unstable partial-phrase speech, while the larger queue levels give Palabra more reserve before speaking. `auto_tempo = false` keeps speech timing fixed during cut-out tests; enable it later if catching up becomes more important than maximum completeness.
+The `[palabra]` section is tuned to favor complete returned audio over the lowest possible latency. This segmentation profile is the setting group that stopped the observed missing/cut-off Palabra audio: `segment_confirmation_silence_threshold = 0.8`, `only_confirm_by_silence = true`, `sentence_splitter_enabled = false`, and `translate_partial_transcriptions = false`. Change these carefully; lower thresholds, non-silence confirmation, sentence splitting, or partial translation can make Palabra split or replace speech segments unpredictably, which may bring missing words/audio chunks back. The larger queue levels give Palabra more reserve before speaking. `auto_tempo = false` keeps speech timing fixed during cut-out tests; enable it later if catching up becomes more important than maximum completeness.
 
 The `[zoom]` devices should match what you selected in Zoom. For the example above, the script records from the matching `CABLE-B Output` side and plays translated audio into the matching `CABLE-A Input` side automatically.
 

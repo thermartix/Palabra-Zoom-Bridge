@@ -39,7 +39,7 @@ from scipy.signal import resample_poly
 SESSION_URL = "https://api.palabra.ai/session-storage/session"
 SESSIONS_URL = "https://api.palabra.ai/session-storage/sessions"
 APP_NAME = "Palabra Zoom Bridge"
-__version__ = "0.3.13"
+__version__ = "0.3.14"
 APP_VERSION = __version__
 CONFIG_PATH = Path("config.toml")
 LOG_DIR = Path("logs")
@@ -893,6 +893,9 @@ async def configure_translation(
             },
             "pipeline": {
                 "preprocessing": {},
+                # These segmentation settings are intentionally conservative.
+                # Loosening them can make Palabra split or replace speech
+                # segments unpredictably and may reintroduce missing audio.
                 "transcription": {
                     "source_language": source_language,
                     "segment_confirmation_silence_threshold": segment_confirmation_silence_threshold,
@@ -2951,7 +2954,10 @@ def parse_args():
             DEFAULT_SEGMENT_CONFIRMATION_SILENCE_THRESHOLD,
             "palabra.segment_confirmation_silence_threshold",
         ),
-        help="Silence Palabra uses before confirming a phrase boundary.",
+        help=(
+            "Silence Palabra uses before confirming a phrase boundary. "
+            "Changing this may cause unpredictable segment splits and missing audio."
+        ),
     )
     parser.add_argument(
         "--sentence-splitter-enabled",
@@ -2962,7 +2968,10 @@ def parse_args():
             DEFAULT_SENTENCE_SPLITTER_ENABLED,
             "palabra.sentence_splitter_enabled",
         ),
-        help="Allow Palabra to split long sentences into phrase-sized segments.",
+        help=(
+            "Allow Palabra to split long sentences into phrase-sized segments. "
+            "Changing this may cause unpredictable segment replacement and missing audio."
+        ),
     )
     parser.add_argument(
         "--only-confirm-by-silence",
@@ -2973,7 +2982,10 @@ def parse_args():
             DEFAULT_ONLY_CONFIRM_BY_SILENCE,
             "palabra.only_confirm_by_silence",
         ),
-        help="Force Palabra to confirm phrase boundaries only after detected silence.",
+        help=(
+            "Force Palabra to confirm phrase boundaries only after detected silence. "
+            "Changing this may cause unpredictable segment splits and missing audio."
+        ),
     )
     parser.add_argument(
         "--palabra-translate-partials",
@@ -2984,7 +2996,10 @@ def parse_args():
             DEFAULT_PALABRA_TRANSLATE_PARTIALS,
             "palabra.translate_partial_transcriptions",
         ),
-        help="Let Palabra translate partial transcriptions so long phrases start speaking earlier.",
+        help=(
+            "Let Palabra translate partial transcriptions so long phrases start speaking earlier. "
+            "Changing this may cause unstable partial speech or missing audio."
+        ),
     )
     parser.add_argument(
         "--palabra-desired-queue-level-ms",
