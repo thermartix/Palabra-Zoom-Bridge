@@ -44,6 +44,7 @@ using ZOOM_SDK_NAMESPACE::IMeetingRecordingController;
 using ZOOM_SDK_NAMESPACE::IMeetingService;
 using ZOOM_SDK_NAMESPACE::IMeetingServiceEvent;
 using ZOOM_SDK_NAMESPACE::IMeetingTalkbackController;
+using ZOOM_SDK_NAMESPACE::IMeetingTalkbackCtrlEvent;
 using ZOOM_SDK_NAMESPACE::INetworkConnectionHandler;
 using ZOOM_SDK_NAMESPACE::INetworkConnectionHelper;
 using ZOOM_SDK_NAMESPACE::IProxySettingHandler;
@@ -418,7 +419,12 @@ std::string MeetingStatusName(MeetingStatus status) {
 
 class MeetingEvent : public IMeetingServiceEvent {
 public:
-    MeetingEvent() : done_(false), reachedMeeting_(false), lastStatus_(ZOOM_SDK_NAMESPACE::MEETING_STATUS_IDLE), lastResult_(0) {}
+    explicit MeetingEvent(bool allowWaitingRoomAsDone)
+        : done_(false),
+          reachedMeeting_(false),
+          allowWaitingRoomAsDone_(allowWaitingRoomAsDone),
+          lastStatus_(ZOOM_SDK_NAMESPACE::MEETING_STATUS_IDLE),
+          lastResult_(0) {}
 
     void onMeetingStatusChanged(MeetingStatus status, int result = 0) override {
         WriteStatus(
@@ -432,7 +438,7 @@ public:
         if (status == MEETING_STATUS_INMEETING) {
             reachedMeeting_.store(true);
             done_.store(true);
-        } else if (status == MEETING_STATUS_WAITINGFORHOST || status == MEETING_STATUS_IN_WAITING_ROOM) {
+        } else if (allowWaitingRoomAsDone_ && (status == MEETING_STATUS_WAITINGFORHOST || status == MEETING_STATUS_IN_WAITING_ROOM)) {
             reachedMeeting_.store(true);
             done_.store(true);
         } else if (status == MEETING_STATUS_FAILED || status == MEETING_STATUS_ENDED) {
@@ -472,6 +478,7 @@ public:
 private:
     std::atomic<bool> done_;
     std::atomic<bool> reachedMeeting_;
+    bool allowWaitingRoomAsDone_;
     MeetingStatus lastStatus_;
     int lastResult_;
 };
@@ -512,6 +519,91 @@ private:
     std::atomic<int> oneWayCount_;
     std::atomic<int> shareCount_;
     std::atomic<int> interpreterCount_;
+};
+
+class TalkbackDiagnosticEvent : public IMeetingTalkbackCtrlEvent {
+public:
+    TalkbackDiagnosticEvent()
+        : createDone_(false),
+          inviteDone_(false),
+          createError_(IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_UNKNOWN),
+          inviteError_(IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_UNKNOWN),
+          invitedUserId_(0) {}
+
+    void onCreateChannelResponse(const zchar_t* channelID, IMeetingTalkbackCtrlEvent::TalkbackError error) override {
+        channelId_ = channelID ? channelID : L"";
+        createError_ = error;
+        createDone_.store(true);
+        WriteStatus(
+            "talkback create channel response id=" + WideToUtf8(channelId_) +
+            " error=" + std::to_string(static_cast<int>(error)));
+    }
+
+    void onDestroyChannelResponse(const zchar_t* channelID, IMeetingTalkbackCtrlEvent::TalkbackError error) override {
+        WriteStatus(
+            "talkback destroy channel response id=" + WideToUtf8(channelID ? channelID : L"") +
+            " error=" + std::to_string(static_cast<int>(error)));
+    }
+
+    void onChannelUserJoinResponse(const zchar_t* channelID, unsigned int userID, IMeetingTalkbackCtrlEvent::TalkbackError error) override {
+        invitedUserId_ = userID;
+        inviteError_ = error;
+        inviteDone_.store(true);
+        WriteStatus(
+            "talkback invite response id=" + WideToUtf8(channelID ? channelID : L"") +
+            " user=" + std::to_string(userID) +
+            " error=" + std::to_string(static_cast<int>(error)));
+    }
+
+    void onChannelUserLeaveResponse(const zchar_t* channelID, unsigned int userID, IMeetingTalkbackCtrlEvent::TalkbackError error) override {
+        WriteStatus(
+            "talkback user leave response id=" + WideToUtf8(channelID ? channelID : L"") +
+            " user=" + std::to_string(userID) +
+            " error=" + std::to_string(static_cast<int>(error)));
+    }
+
+    void onJoinTalkbackChannel(unsigned int inviterID) override {
+        WriteStatus("talkback joined channel inviter=" + std::to_string(inviterID));
+    }
+
+    void onLeaveTalkbackChannel(unsigned int inviterID) override {
+        WriteStatus("talkback left channel inviter=" + std::to_string(inviterID));
+    }
+
+    void onInviterAudioLevel(unsigned int inviterID, unsigned int audioLevel) override {
+        if (audioLevel > 0) {
+            WriteStatus("talkback inviter audio level inviter=" + std::to_string(inviterID) + " level=" + std::to_string(audioLevel));
+        }
+    }
+
+    const std::atomic<bool>& createDone() const {
+        return createDone_;
+    }
+
+    const std::atomic<bool>& inviteDone() const {
+        return inviteDone_;
+    }
+
+    bool createSucceeded() const {
+        return createError_ == IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_OK && !channelId_.empty();
+    }
+
+    bool inviteSucceeded() const {
+        return inviteError_ == IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_OK ||
+               inviteError_ == IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_ALREADY_EXIST;
+    }
+
+    const std::wstring& channelId() const {
+        return channelId_;
+    }
+
+private:
+    std::atomic<bool> createDone_;
+    std::atomic<bool> inviteDone_;
+    IMeetingTalkbackCtrlEvent::TalkbackError createError_;
+    IMeetingTalkbackCtrlEvent::TalkbackError inviteError_;
+    unsigned int invitedUserId_;
+    std::wstring channelId_;
 };
 
 class StingMicEvent : public IZoomSDKVirtualAudioMicEvent {
@@ -649,6 +741,7 @@ int PrintHelp() {
         << "  --force-mic-send    Diagnostic: send as soon as the SDK exposes a virtual mic sender.\n"
         << "  --raw-audio-diagnostics\n"
         << "                       Log raw recording, archiving, interpretation, talkback, and subscribe state.\n"
+        << "  --talkback-sting    Create a talkback channel and send the original test sting through it.\n"
         << "  --custom-ui         Initialize the SDK without the default Zoom meeting UI.\n"
         << "  --sdk-root PATH     SDK root, e.g. C:\\dev\\zoom-sdk-windows.\n"
         << "  --timeout SECONDS   SDK call timeout for probe modes. Default: 30.\n"
@@ -681,6 +774,9 @@ int RunChildWithWatchdog(const std::vector<std::wstring>& args, const wchar_t* p
     }
     if (HasArg(args, L"--raw-audio-diagnostics")) {
         commandLine += L" --raw-audio-diagnostics";
+    }
+    if (HasArg(args, L"--talkback-sting")) {
+        commandLine += L" --talkback-sting";
     }
     if (HasArg(args, L"--custom-ui")) {
         commandLine += L" --custom-ui";
@@ -845,6 +941,140 @@ void RunRawAudioDiagnostics(IMeetingService* meetingService, IZoomSDKAudioRawDat
     }
 
     WriteStatus("raw audio diagnostics end");
+}
+
+bool SendGeneratedTalkbackSting(IMeetingTalkbackController* talkbackController, const std::wstring& channelId) {
+    const int sampleRate = 48000;
+    const int blockFrames = 960;
+    const int totalFrames = sampleRate * 2;
+    const double notes[] = {261.63, 329.63, 392.00, 523.25, 392.00, 523.25};
+    const int noteCount = static_cast<int>(sizeof(notes) / sizeof(notes[0]));
+    const int framesPerNote = totalFrames / noteCount;
+    std::vector<short> samples(blockFrames);
+
+    for (int frame = 0; frame < totalFrames; frame += blockFrames) {
+        int framesThisBlock = std::min(blockFrames, totalFrames - frame);
+        for (int i = 0; i < framesThisBlock; ++i) {
+            int absoluteFrame = frame + i;
+            int noteIndex = std::min(noteCount - 1, absoluteFrame / framesPerNote);
+            double t = static_cast<double>(absoluteFrame) / sampleRate;
+            double local = static_cast<double>(absoluteFrame % framesPerNote) / framesPerNote;
+            double env = std::min(1.0, local * 16.0) * std::min(1.0, (1.0 - local) * 8.0);
+            double base = notes[noteIndex];
+            double wave =
+                0.70 * std::sin(2.0 * 3.14159265358979323846 * base * t) +
+                0.22 * std::sin(2.0 * 3.14159265358979323846 * base * 2.0 * t) +
+                0.08 * std::sin(2.0 * 3.14159265358979323846 * base * 3.0 * t);
+            int value = static_cast<int>(wave * env * 12000.0);
+            value = std::max(-32768, std::min(32767, value));
+            samples[i] = static_cast<short>(value);
+        }
+        if (framesThisBlock < blockFrames) {
+            std::fill(samples.begin() + framesThisBlock, samples.end(), 0);
+        }
+
+        SDKError sendResult = talkbackController->SendAudioDataToChannel(
+            channelId.c_str(),
+            reinterpret_cast<const char*>(samples.data()),
+            static_cast<unsigned int>(framesThisBlock * sizeof(short)),
+            sampleRate,
+            ZoomSDKAudioChannel_Mono);
+        if (sendResult != SDKERR_SUCCESS) {
+            WriteError("SendAudioDataToChannel returned SDKError " + std::to_string(static_cast<int>(sendResult)) + ".");
+            return false;
+        }
+        Sleep(20);
+    }
+
+    WriteStatus("talkback sting sent");
+    return true;
+}
+
+bool RunTalkbackStingProbe(IMeetingService* meetingService, int timeoutSeconds) {
+    WriteStatus("talkback sting probe begin");
+
+    IMeetingTalkbackController* talkbackController = meetingService->GetMeetingTalkbackController();
+    if (!talkbackController) {
+        WriteError("Meeting talkback controller was not available.");
+        return false;
+    }
+    if (!talkbackController->IsMeetingSupportTalkBack()) {
+        WriteError("Meeting does not support talkback.");
+        return false;
+    }
+
+    IMeetingParticipantsController* participantsController = meetingService->GetMeetingParticipantsController();
+    if (!participantsController) {
+        WriteError("Meeting participants controller was not available.");
+        return false;
+    }
+
+    unsigned int inviteUserId = 0;
+    ZOOM_SDK_NAMESPACE::IList<unsigned int>* participants = participantsController->GetParticipantsList();
+    int participantCount = participants ? participants->GetCount() : 0;
+    WriteStatus("talkback participant count=" + std::to_string(participantCount));
+    for (int index = 0; index < participantCount; ++index) {
+        unsigned int userId = participants->GetItem(index);
+        IUserInfo* userInfo = participantsController->GetUserByUserID(userId);
+        if (!userInfo || userInfo->IsMySelf()) {
+            continue;
+        }
+        WriteStatus(
+            "talkback candidate user=" + std::to_string(userId) +
+            " name=" + WideToUtf8(userInfo->GetUserName() ? userInfo->GetUserName() : L"") +
+            " supports=" + std::to_string(userInfo->IsSupportTalkback() ? 1 : 0));
+        if (userInfo->IsSupportTalkback()) {
+            inviteUserId = userId;
+            break;
+        }
+    }
+
+    if (inviteUserId == 0) {
+        WriteError("No other talkback-capable participant was found.");
+        return false;
+    }
+
+    TalkbackDiagnosticEvent talkbackEvent;
+    SDKError setEventResult = talkbackController->SetEvent(&talkbackEvent);
+    WriteStatus("talkback SetEvent returned SDKError " + std::to_string(static_cast<int>(setEventResult)));
+    if (setEventResult != SDKERR_SUCCESS) {
+        return false;
+    }
+
+    SDKError createResult = talkbackController->CreateChannel(1);
+    WriteStatus("talkback CreateChannel returned SDKError " + std::to_string(static_cast<int>(createResult)));
+    if (createResult != SDKERR_SUCCESS) {
+        return false;
+    }
+    if (!WaitForFlag(talkbackEvent.createDone(), std::min(15, std::max(3, timeoutSeconds / 4))) || !talkbackEvent.createSucceeded()) {
+        WriteError("Talkback channel creation did not succeed.");
+        return false;
+    }
+
+    const std::wstring& channelId = talkbackEvent.channelId();
+    SDKError beginInvite = talkbackController->BeginBatchInviteUsers(channelId.c_str());
+    WriteStatus("talkback BeginBatchInviteUsers returned SDKError " + std::to_string(static_cast<int>(beginInvite)));
+    if (beginInvite != SDKERR_SUCCESS) {
+        return false;
+    }
+    SDKError addInvite = talkbackController->AddUserToInvite(inviteUserId);
+    WriteStatus("talkback AddUserToInvite returned SDKError " + std::to_string(static_cast<int>(addInvite)));
+    if (addInvite != SDKERR_SUCCESS) {
+        return false;
+    }
+    SDKError executeInvite = talkbackController->ExecuteBatchInviteUsers();
+    WriteStatus("talkback ExecuteBatchInviteUsers returned SDKError " + std::to_string(static_cast<int>(executeInvite)));
+    if (executeInvite != SDKERR_SUCCESS) {
+        return false;
+    }
+    if (!WaitForFlag(talkbackEvent.inviteDone(), std::min(20, std::max(5, timeoutSeconds / 3))) || !talkbackEvent.inviteSucceeded()) {
+        WriteError("Talkback invite did not succeed.");
+        return false;
+    }
+
+    bool sent = SendGeneratedTalkbackSting(talkbackController, channelId);
+    WriteStatus("talkback sting probe end");
+    return sent;
 }
 
 bool InitializeSdk(const std::vector<std::wstring>& args, LoadedSdk& sdk) {
@@ -1030,7 +1260,8 @@ int RunSdkProbe(const std::vector<std::wstring>& args, bool initialize, bool aut
             if (joinMeeting) {
                 bool playSting = HasAnyArg(args, L"--play-sting", L"--play-test-sting");
                 bool rawAudioDiagnostics = HasArg(args, L"--raw-audio-diagnostics");
-                bool needsMeetingAudio = playSting || rawAudioDiagnostics;
+                bool talkbackSting = HasArg(args, L"--talkback-sting");
+                bool needsMeetingAudio = playSting || rawAudioDiagnostics || talkbackSting;
                 std::wstring meetingNumberRaw = ResolveMeetingNumber();
                 UINT64 meetingNumber = ParseMeetingNumber(meetingNumberRaw);
                 if (meetingNumber == 0) {
@@ -1054,7 +1285,7 @@ int RunSdkProbe(const std::vector<std::wstring>& args, bool initialize, bool aut
                     return 2;
                 }
 
-                MeetingEvent meetingEvent;
+                MeetingEvent meetingEvent(!needsMeetingAudio);
                 SDKError meetingEventResult = meetingService->SetEvent(&meetingEvent);
                 if (meetingEventResult != SDKERR_SUCCESS) {
                     WriteError("IMeetingService::SetEvent failed with SDKError " + std::to_string(static_cast<int>(meetingEventResult)) + ".");
@@ -1133,6 +1364,21 @@ int RunSdkProbe(const std::vector<std::wstring>& args, bool initialize, bool aut
 
                 if (rawAudioDiagnostics) {
                     RunRawAudioDiagnostics(meetingService, getAudioRawdataHelper ? getAudioRawdataHelper() : nullptr, ArgIntValue(args, L"--timeout", 30));
+                }
+
+                if (talkbackSting) {
+                    if (!RunTalkbackStingProbe(meetingService, ArgIntValue(args, L"--timeout", 30))) {
+                        if (HasArg(args, L"--skip-cleanup")) {
+                            FastExit(2);
+                        }
+                        destroyMeetingService(meetingService);
+                        destroyAuthService(authService);
+                        if (networkHelper) {
+                            networkHelper->UnRegisterNetworkConnectionHandler();
+                            destroyNetworkHelper(networkHelper);
+                        }
+                        return 2;
+                    }
                 }
 
                 if (playSting) {

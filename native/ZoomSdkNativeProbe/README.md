@@ -33,6 +33,12 @@ Current state:
   `SDKERR_NO_PERMISSION`, raw archiving returned
   `SDKERR_MEETING_DONT_SUPPORT_FEATURE`, interpretation was disabled, and
   talkback was supported.
+- `--talkback-sting` probes the SDK's direct talkback PCM path. It creates a
+  talkback channel, invites the first other participant who supports talkback,
+  and sends a short original 48 kHz mono PCM test sting with
+  `SendAudioDataToChannel`. This is not the final interpretation-channel path,
+  but it is the next viable SDK audio-output probe because it does not depend on
+  raw recording permission or the virtual mic start callback.
 - `ZOOM_SDK_APP_PRIVILEGE_TOKEN` can be set when Zoom requires a separate app
   privilege token. The SDK auth JWT is not used for that join field.
 - Raw audio subscription and interpreter/talkback output are the next steps after
@@ -59,4 +65,5 @@ Test through Python:
 & "C:\Users\marti\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --mode sdk-probe --zoom-sdk-meeting-number 123456789 --zoom-sdk-probe-seconds 1 --zoom-sdk-root C:\dev\zoom-sdk-windows --zoom-sdk-adapter-module modules.zoom_sdk_process_adapter --zoom-sdk-adapter-command native\ZoomSdkNativeProbe\bin\x64\Release\ZoomSdkNativeProbe.exe --zoom-sdk-adapter-args --sdk-join --timeout 60
 & "C:\Users\marti\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --mode sdk-probe --zoom-sdk-meeting-number 123456789 --zoom-sdk-probe-seconds 1 --zoom-sdk-root C:\dev\zoom-sdk-windows --zoom-sdk-adapter-module modules.zoom_sdk_process_adapter --zoom-sdk-adapter-command native\ZoomSdkNativeProbe\bin\x64\Release\ZoomSdkNativeProbe.exe --zoom-sdk-adapter-args --sdk-join --play-sting --custom-ui --timeout 120
 & "C:\Users\marti\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --mode sdk-probe --zoom-sdk-meeting-number 123456789 --zoom-sdk-probe-seconds 1 --zoom-sdk-root C:\dev\zoom-sdk-windows --zoom-sdk-adapter-module modules.zoom_sdk_process_adapter --zoom-sdk-adapter-command native\ZoomSdkNativeProbe\bin\x64\Release\ZoomSdkNativeProbe.exe --zoom-sdk-adapter-args --sdk-join --custom-ui --raw-audio-diagnostics --timeout 120
+& "C:\Users\marti\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --mode sdk-probe --zoom-sdk-meeting-number 123456789 --zoom-sdk-probe-seconds 1 --zoom-sdk-root C:\dev\zoom-sdk-windows --zoom-sdk-adapter-module modules.zoom_sdk_process_adapter --zoom-sdk-adapter-command native\ZoomSdkNativeProbe\bin\x64\Release\ZoomSdkNativeProbe.exe --zoom-sdk-adapter-args --sdk-join --custom-ui --talkback-sting --timeout 120
 ```
