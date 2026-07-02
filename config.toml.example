@@ -25,6 +25,7 @@ input_block_ms = 50
 raw_palabra_playback = false
 playback_buffer_ms = 300
 phrase_start_buffer_ms = 1200
+playback_max_tempo = 1.15
 startup_delay = 0.0
 task_ready_timeout_seconds = 30.0
 task_poll_seconds = 2.0
