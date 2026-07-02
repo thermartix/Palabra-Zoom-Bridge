@@ -33,15 +33,15 @@ graceful_shutdown_timeout_seconds = 6.0
 playback_drain_timeout_seconds = 30.0
 
 [palabra]
-segment_confirmation_silence_threshold = 0.3
-only_confirm_by_silence = false
-sentence_splitter_enabled = true
-translate_partial_transcriptions = true
-desired_queue_level_ms = 2000
-max_queue_level_ms = 5000
-auto_tempo = true
+segment_confirmation_silence_threshold = 0.8
+only_confirm_by_silence = true
+sentence_splitter_enabled = false
+translate_partial_transcriptions = false
+desired_queue_level_ms = 3000
+max_queue_level_ms = 8000
+auto_tempo = false
 min_tempo = 1.0
-max_tempo = 1.1
+max_tempo = 1.0
 [diagnostics]
 test_seconds = 3.0
 test_volume = 0.5
