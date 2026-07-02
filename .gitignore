@@ -5,6 +5,7 @@
 *.local.toml
 config.local.toml
 config.toml
+AGENTS.md
 secrets.*
 *.pem
 *.key
