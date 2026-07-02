@@ -20,6 +20,7 @@ import threading
 import time
 import traceback
 import contextlib
+import wave
 from datetime import datetime
 from fractions import Fraction
 from pathlib import Path
@@ -38,7 +39,7 @@ from scipy.signal import resample_poly
 SESSION_URL = "https://api.palabra.ai/session-storage/session"
 SESSIONS_URL = "https://api.palabra.ai/session-storage/sessions"
 APP_NAME = "Palabra Zoom Bridge"
-__version__ = "0.3.4"
+__version__ = "0.3.5"
 APP_VERSION = __version__
 CONFIG_PATH = Path("config.toml")
 LOG_DIR = Path("logs")
@@ -183,65 +184,57 @@ def write_last_error_log(error: BaseException) -> None:
     write_log_file(LAST_ERROR_LOG_PATH, text, append=False)
 
 
-class Mp3DebugRecorder:
-    QUEUE_MAX_BLOCKS = 900
-
+class WavDebugRecorder:
     def __init__(self, path: Path, sample_rate: int, channels: int) -> None:
         self.path = path
         self.sample_rate = sample_rate
         self.channels = channels
-        self.process: Optional[subprocess.Popen] = None
-        self.queue: queue.Queue[Optional[np.ndarray]] = queue.Queue(maxsize=self.QUEUE_MAX_BLOCKS)
+        self.file: Optional[wave.Wave_write] = None
+        self.lock = threading.Lock()
+
+    def __enter__(self) -> "WavDebugRecorder":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.file = wave.open(str(self.path), "wb")
+        self.file.setnchannels(self.channels)
+        self.file.setsampwidth(2)
+        self.file.setframerate(self.sample_rate)
+        return self
+
+    def write(self, audio: np.ndarray) -> None:
+        if self.file is None or len(audio) == 0:
+            return
+        with self.lock:
+            self.file.writeframes(audio.astype(np.int16, copy=False).tobytes())
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self.file is not None:
+            self.file.close()
+            self.file = None
+
+
+class AsyncWavDebugRecorder(WavDebugRecorder):
+    def __init__(self, path: Path, sample_rate: int, channels: int) -> None:
+        super().__init__(path, sample_rate, channels)
+        self.queue: queue.Queue[Optional[np.ndarray]] = queue.Queue(maxsize=300)
         self.thread: Optional[threading.Thread] = None
         self.dropped_blocks = 0
 
-    def __enter__(self) -> "Mp3DebugRecorder":
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        ffmpeg = shutil.which("ffmpeg")
-        if ffmpeg is None:
-            raise RuntimeError("ffmpeg is required for debug MP3 recording. Install ffmpeg or disable recording.")
-        self.process = subprocess.Popen(
-            [
-                ffmpeg,
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-f",
-                "s16le",
-                "-ar",
-                str(self.sample_rate),
-                "-ac",
-                str(self.channels),
-                "-i",
-                "pipe:0",
-                "-codec:a",
-                "libmp3lame",
-                "-b:a",
-                "128k",
-                "-y",
-                str(self.path),
-            ],
-            stdin=subprocess.PIPE,
-        )
-        self.thread = threading.Thread(target=self._run_encoder, daemon=True)
+    def __enter__(self) -> "AsyncWavDebugRecorder":
+        super().__enter__()
+
+        def run() -> None:
+            while True:
+                audio = self.queue.get()
+                if audio is None:
+                    break
+                super(AsyncWavDebugRecorder, self).write(audio)
+
+        self.thread = threading.Thread(target=run, daemon=True)
         self.thread.start()
         return self
 
-    def _run_encoder(self) -> None:
-        while True:
-            audio = self.queue.get()
-            if audio is None:
-                break
-            self._write_to_ffmpeg(audio)
-
-    def _write_to_ffmpeg(self, audio: np.ndarray) -> None:
-        if self.process is None or self.process.stdin is None or len(audio) == 0:
-            return
-        with contextlib.suppress(BrokenPipeError):
-            self.process.stdin.write(audio.astype(np.int16, copy=False).tobytes())
-
     def write(self, audio: np.ndarray) -> None:
-        if self.process is None or len(audio) == 0:
+        if self.file is None or len(audio) == 0:
             return
         block = audio.astype(np.int16, copy=True)
         try:
@@ -263,16 +256,44 @@ class Mp3DebugRecorder:
                     self.dropped_blocks += 1
                     with contextlib.suppress(queue.Empty):
                         self.queue.get_nowait()
-            self.thread.join(timeout=10)
+            self.thread.join(timeout=2)
             self.thread = None
-        if self.process is not None:
-            if self.process.stdin is not None:
-                with contextlib.suppress(BrokenPipeError):
-                    self.process.stdin.close()
-            self.process.wait()
-            self.process = None
         if self.dropped_blocks:
-            print(f"Warning: dropped {self.dropped_blocks} debug MP3 block(s) for {self.path}", flush=True)
+            print(f"Warning: dropped {self.dropped_blocks} debug WAV block(s) for {self.path}", flush=True)
+        super().__exit__(exc_type, exc, tb)
+
+
+def require_ffmpeg_for_debug_mp3() -> str:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise RuntimeError("ffmpeg is required for debug MP3 conversion. Install ffmpeg or disable recording.")
+    return ffmpeg
+
+
+def convert_debug_wavs_to_mp3(wav_paths: list[Path], ffmpeg: str) -> None:
+    for wav_path in wav_paths:
+        if not wav_path.exists():
+            continue
+        mp3_path = wav_path.with_suffix(".mp3")
+        subprocess.run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(wav_path),
+                "-codec:a",
+                "libmp3lame",
+                "-b:a",
+                "128k",
+                str(mp3_path),
+            ],
+            check=True,
+        )
+        wav_path.unlink()
+        print(f"Converted debug MP3: {mp3_path}", flush=True)
 
 
 @dataclasses.dataclass
@@ -1307,10 +1328,10 @@ class AudioBridge:
         self.playback_status_count = 0
         self.output_audio_chunks = 0
         self.dumped_palabra_message_types: set[str] = set()
-        self.api_input_recorder: Optional[Mp3DebugRecorder] = None
-        self.api_output_recorder: Optional[Mp3DebugRecorder] = None
-        self.device_output_recorder: Optional[Mp3DebugRecorder] = None
-        self.callback_output_recorder: Optional[Mp3DebugRecorder] = None
+        self.api_input_recorder: Optional[WavDebugRecorder] = None
+        self.api_output_recorder: Optional[WavDebugRecorder] = None
+        self.device_output_recorder: Optional[WavDebugRecorder] = None
+        self.callback_output_recorder: Optional[AsyncWavDebugRecorder] = None
         self.debug_text_logger: Optional[DebugTextLogger] = None
         self.first_source_transcription_time: Optional[float] = None
         self.last_no_output_warning = 0.0
@@ -2190,11 +2211,13 @@ async def run(args) -> None:
     bridge: Optional[AudioBridge] = None
     capture_thread: Optional[threading.Thread] = None
     playback_stream: Optional[sd.OutputStream] = None
-    api_input_recorder: Optional[Mp3DebugRecorder] = None
-    api_output_recorder: Optional[Mp3DebugRecorder] = None
-    device_output_recorder: Optional[Mp3DebugRecorder] = None
-    callback_output_recorder: Optional[Mp3DebugRecorder] = None
+    api_input_recorder: Optional[WavDebugRecorder] = None
+    api_output_recorder: Optional[WavDebugRecorder] = None
+    device_output_recorder: Optional[WavDebugRecorder] = None
+    callback_output_recorder: Optional[AsyncWavDebugRecorder] = None
     debug_text_logger: Optional[DebugTextLogger] = None
+    debug_wav_paths: list[Path] = []
+    debug_ffmpeg: Optional[str] = None
     try:
         try:
             bridge, capture_thread, playback_stream = start_audio_with_fallback(
@@ -2203,24 +2226,31 @@ async def run(args) -> None:
                 target_language,
             )
             if args.record_debug_mp3:
+                debug_ffmpeg = require_ffmpeg_for_debug_mp3()
                 timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-                api_input_recorder = Mp3DebugRecorder(
-                    Path("debug") / f"palabra_input_api_{timestamp}.mp3",
+                debug_wav_paths = [
+                    Path("debug") / f"palabra_input_api_{timestamp}.wav",
+                    Path("debug") / f"palabra_output_api_{timestamp}.wav",
+                    Path("debug") / f"zoom_mic_output_{timestamp}.wav",
+                    Path("debug") / f"zoom_mic_callback_{timestamp}.wav",
+                ]
+                api_input_recorder = WavDebugRecorder(
+                    debug_wav_paths[0],
                     args.api_rate,
                     args.channels,
                 ).__enter__()
-                api_output_recorder = Mp3DebugRecorder(
-                    Path("debug") / f"palabra_output_api_{timestamp}.mp3",
+                api_output_recorder = WavDebugRecorder(
+                    debug_wav_paths[1],
                     PALABRA_OUTPUT_RATE,
                     PALABRA_OUTPUT_CHANNELS,
                 ).__enter__()
-                device_output_recorder = Mp3DebugRecorder(
-                    Path("debug") / f"zoom_mic_output_{timestamp}.mp3",
+                device_output_recorder = WavDebugRecorder(
+                    debug_wav_paths[2],
                     args.device_rate,
                     args.device_channels,
                 ).__enter__()
-                callback_output_recorder = Mp3DebugRecorder(
-                    Path("debug") / f"zoom_mic_callback_{timestamp}.mp3",
+                callback_output_recorder = AsyncWavDebugRecorder(
+                    debug_wav_paths[3],
                     args.device_rate,
                     args.device_channels,
                 ).__enter__()
@@ -2232,10 +2262,11 @@ async def run(args) -> None:
                 bridge.device_output_recorder = device_output_recorder
                 bridge.callback_output_recorder = callback_output_recorder
                 bridge.debug_text_logger = debug_text_logger
-                print(f"Recording Palabra input MP3: {api_input_recorder.path}")
-                print(f"Recording Palabra output MP3: {api_output_recorder.path}")
-                print(f"Recording Zoom mic output MP3: {device_output_recorder.path}")
-                print(f"Recording exact callback output MP3: {callback_output_recorder.path}")
+                print("Recording debug WAVs during the live run; converting to MP3 after shutdown.")
+                print(f"Recording Palabra input WAV: {api_input_recorder.path}")
+                print(f"Recording Palabra output WAV: {api_output_recorder.path}")
+                print(f"Recording Zoom mic output WAV: {device_output_recorder.path}")
+                print(f"Recording exact callback output WAV: {callback_output_recorder.path}")
                 print(f"Recording Palabra text events: {debug_text_logger.path}")
 
             session = await create_session(client_id, client_secret)
@@ -2384,6 +2415,14 @@ async def run(args) -> None:
         if capture_thread is not None:
             capture_thread.join(timeout=2)
         restore_windows_power_state(keep_awake_enabled)
+        if debug_ffmpeg is not None and debug_wav_paths:
+            try:
+                convert_debug_wavs_to_mp3(debug_wav_paths, debug_ffmpeg)
+            except Exception as exc:
+                print(
+                    f"Warning: could not convert debug WAV files to MP3: {exc}",
+                    flush=True,
+                )
 
 
 def parse_args():
