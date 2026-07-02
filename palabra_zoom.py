@@ -88,6 +88,7 @@ async def run_sdk_probe(args) -> None:
         channels=args.zoom_sdk_channels,
         adapter_module=args.zoom_sdk_adapter_module,
         adapter_command=args.zoom_sdk_adapter_command,
+        sdk_root=args.zoom_sdk_root,
         adapter_args=tuple(args.zoom_sdk_adapter_args),
         dry_run=args.zoom_sdk_dry_run,
         auth_token=auth_token,
@@ -467,6 +468,16 @@ def parse_args():
             "zoom_sdk.adapter_command",
         ),
         help="External native SDK probe executable used by the process adapter.",
+    )
+    parser.add_argument(
+        "--zoom-sdk-root",
+        default=config_string(
+            zoom_sdk,
+            "sdk_root",
+            DEFAULT_ZOOM_SDK_ROOT,
+            "zoom_sdk.sdk_root",
+        ),
+        help="Path to the extracted Zoom Meeting SDK for Windows, such as C:\\dev\\zoom-sdk-windows.",
     )
     parser.add_argument(
         "--zoom-sdk-adapter-args",

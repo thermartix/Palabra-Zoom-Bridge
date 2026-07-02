@@ -1,6 +1,6 @@
 # Palabra Zoom Bridge
 
-Version: 0.3.25
+Version: 0.3.26
 
 Local MVP bridge for one Zoom interpretation channel:
 
@@ -267,8 +267,9 @@ meeting_number = "..."
 password = "..."
 display_name = "Palabra SDK Probe"
 adapter_module = "modules.zoom_sdk_process_adapter"
-adapter_command = "path/to/native_zoom_sdk_probe.exe"
-adapter_args = []
+adapter_command = "native/ZoomSdkNativeProbe/bin/x64/Release/ZoomSdkNativeProbe.exe"
+adapter_args = ["--sdk-info"]
+sdk_root = "C:/dev/zoom-sdk-windows"
 output_wav = "debug/zoom_sdk_probe.wav"
 sample_rate = 48000
 channels = 1
@@ -292,6 +293,7 @@ variables:
 - `ZOOM_SDK_PROBE_SECONDS`
 - `ZOOM_SDK_SAMPLE_RATE`
 - `ZOOM_SDK_CHANNELS`
+- `ZOOM_MEETING_SDK_ROOT`
 
 The native process should write one JSON object per stdout line:
 
@@ -316,3 +318,31 @@ Then test the Python process adapter through the helper simulator:
 ```powershell
 & "C:\Users\marti\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --mode sdk-probe --zoom-sdk-meeting-number 123456789 --zoom-sdk-probe-seconds 1 --zoom-sdk-adapter-module modules.zoom_sdk_process_adapter --zoom-sdk-adapter-command native\ZoomSdkProbe\bin\Release\ZoomSdkProbe.exe --zoom-sdk-adapter-args --simulate
 ```
+
+A C++ helper project lives in `native/ZoomSdkNativeProbe`. This is the real
+Zoom Meeting SDK path. It dynamically loads `sdk.dll` from `zoom_sdk.sdk_root`,
+so the SDK DLLs can stay in the extracted SDK folder instead of being copied
+into this repo.
+
+Build it with Visual Studio Build Tools:
+
+```powershell
+& "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Current\Bin\MSBuild.exe" native\ZoomSdkNativeProbe\ZoomSdkNativeProbe.vcxproj /p:Configuration=Release /p:Platform=x64 /p:ZoomMeetingSdkRoot=C:\dev\zoom-sdk-windows
+```
+
+Verify SDK loading directly:
+
+```powershell
+& native\ZoomSdkNativeProbe\bin\x64\Release\ZoomSdkNativeProbe.exe --sdk-info --sdk-root C:\dev\zoom-sdk-windows
+```
+
+Or through the Python process adapter:
+
+```powershell
+& "C:\Users\marti\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --mode sdk-probe --zoom-sdk-meeting-number 123456789 --zoom-sdk-probe-seconds 1 --zoom-sdk-root C:\dev\zoom-sdk-windows --zoom-sdk-adapter-module modules.zoom_sdk_process_adapter --zoom-sdk-adapter-command native\ZoomSdkNativeProbe\bin\x64\Release\ZoomSdkNativeProbe.exe --zoom-sdk-adapter-args --sdk-info
+```
+
+`--sdk-init` is intentionally still experimental. On the first local test, SDK
+loading succeeded and reported version `7.1.0 (41845)`, but `InitSDK` did not
+return. The next SDK step is to compare the helper's initialization settings
+with Zoom's demo app, especially around message-pump and UI initialization.

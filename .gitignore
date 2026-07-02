@@ -34,6 +34,8 @@ logs/
 # Native helper build output
 native/ZoomSdkProbe/bin/
 native/ZoomSdkProbe/obj/
+native/ZoomSdkNativeProbe/bin/
+native/ZoomSdkNativeProbe/obj/
 
 # OS and editor metadata
 .DS_Store

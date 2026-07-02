@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 APP_NAME = "Palabra Zoom Bridge"
-__version__ = "0.3.25"
+__version__ = "0.3.26"
 APP_VERSION = __version__
 CONFIG_PATH = Path("config.toml")
 LOG_DIR = Path("logs")
@@ -30,6 +30,7 @@ DEFAULT_ZOOM_SDK_CHANNELS = 1
 DEFAULT_ZOOM_SDK_ADAPTER_MODULE = ""
 DEFAULT_ZOOM_SDK_ADAPTER_COMMAND = ""
 DEFAULT_ZOOM_SDK_ADAPTER_ARGS = ()
+DEFAULT_ZOOM_SDK_ROOT = ""
 DEFAULT_ZOOM_SDK_DRY_RUN = False
 DEFAULT_DEVICE_RATE = 48000
 DEFAULT_API_RATE = 24000

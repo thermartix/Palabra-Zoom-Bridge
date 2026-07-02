@@ -25,6 +25,7 @@ class ZoomSdkProbeSettings:
     channels: int
     adapter_module: str
     adapter_command: str
+    sdk_root: str
     dry_run: bool
     adapter_args: tuple[str, ...] = ()
     auth_token: str = ""

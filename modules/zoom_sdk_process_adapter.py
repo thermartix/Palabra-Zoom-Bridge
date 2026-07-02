@@ -23,6 +23,7 @@ def _adapter_environment(settings) -> dict[str, str]:
             "ZOOM_SDK_PROBE_SECONDS": str(settings.probe_seconds),
             "ZOOM_SDK_SAMPLE_RATE": str(settings.sample_rate),
             "ZOOM_SDK_CHANNELS": str(settings.channels),
+            "ZOOM_MEETING_SDK_ROOT": settings.sdk_root,
         }
     )
     return env
