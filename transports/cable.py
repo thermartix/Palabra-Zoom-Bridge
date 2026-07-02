@@ -15,6 +15,7 @@ from typing import Optional
 
 import numpy as np
 import sounddevice as sd
+from scipy.signal import resample_poly
 
 from audio_utils import PlaybackChunk, convert_channels_int16, resample_int16, stream_blocksize
 from constants import *
@@ -27,6 +28,7 @@ from palabra_client import (
     compact_payload_shape,
     first_text_value,
     format_palabra_message_details,
+    language_label,
     parse_palabra_message,
 )
 
