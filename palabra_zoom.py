@@ -39,7 +39,7 @@ from scipy.signal import resample_poly
 SESSION_URL = "https://api.palabra.ai/session-storage/session"
 SESSIONS_URL = "https://api.palabra.ai/session-storage/sessions"
 APP_NAME = "Palabra Zoom Bridge"
-__version__ = "0.3.15"
+__version__ = "0.3.16"
 APP_VERSION = __version__
 CONFIG_PATH = Path("config.toml")
 LOG_DIR = Path("logs")
@@ -97,6 +97,7 @@ DEFAULT_PLAYBACK_TEMPO = 1.0
 DEFAULT_PLAYBACK_MAX_LOCAL_TEMPO = 1.06
 DEFAULT_PLAYBACK_TEMPO_ALGORITHM = "resample"
 PLAYBACK_TEMPO_ALGORITHMS = {"resample", "rubberband"}
+TEMPO_PREPROCESS_MIN_MS = 700
 DEFAULT_PLAYBACK_FADE_MS = 5
 DEFAULT_IDLE_NOISE_AMPLITUDE = 96
 BLOCKED_HOSTAPIS = {"Windows WASAPI"}
@@ -1345,6 +1346,9 @@ class AudioBridge:
         self.playback_tempo = max(1.0, float(playback_tempo))
         self.playback_max_tempo = max(1.0, float(playback_max_tempo))
         self.playback_tempo_algorithm = playback_tempo_algorithm
+        self.tempo_preprocess_min_samples = int(device_rate * TEMPO_PREPROCESS_MIN_MS / 1000) * device_channels
+        self.tempo_pending_chunks: list[np.ndarray] = []
+        self.tempo_pending_samples = 0
         self.playback_fade_frames = max(1, int(device_rate * playback_fade_ms / 1000))
         noise_frames = max(device_rate, self.playback_fade_frames)
         noise_rng = np.random.default_rng(1)
@@ -1439,9 +1443,14 @@ class AudioBridge:
                 return offset
         return None
 
-    def _queue_playback_chunk(self, audio: np.ndarray, segment_end: bool) -> None:
+    def _queue_playback_chunk(self, audio: np.ndarray, segment_end: bool, force: bool = False) -> None:
         if len(audio) == 0 and not segment_end:
             return
+        if not self.raw_palabra_playback:
+            prepared = self._prepare_tempo_playback_chunk(audio, segment_end=segment_end, force=force)
+            if prepared is None:
+                return
+            audio = prepared
         self.playback_queue.put_nowait(PlaybackChunk(audio, segment_end=segment_end))
 
     def _reset_pending_playback_phrase(self) -> None:
@@ -1450,8 +1459,10 @@ class AudioBridge:
         self.pending_playback_phrase_samples = 0
         self.pending_playback_phrase_released = False
 
-    def _release_pending_playback_phrase(self, segment_end: bool) -> None:
+    def _release_pending_playback_phrase(self, segment_end: bool, force: bool = False) -> None:
         if not self.pending_playback_phrase_chunks:
+            if segment_end and self.tempo_pending_chunks:
+                self._queue_playback_chunk(np.array([], dtype=np.int16), segment_end=True, force=True)
             if segment_end:
                 self._reset_pending_playback_phrase()
             return
@@ -1460,7 +1471,7 @@ class AudioBridge:
             audio = self.pending_playback_phrase_chunks[0]
         else:
             audio = np.concatenate(self.pending_playback_phrase_chunks)
-        self._queue_playback_chunk(audio, segment_end=segment_end)
+        self._queue_playback_chunk(audio, segment_end=segment_end, force=segment_end or force)
         self.pending_playback_phrase_chunks = []
         self.pending_playback_phrase_samples = 0
 
@@ -1480,11 +1491,11 @@ class AudioBridge:
             return
 
         if self.pending_playback_phrase_key != phrase_key:
-            self._release_pending_playback_phrase(segment_end=False)
+            self._release_pending_playback_phrase(segment_end=False, force=True)
             self.pending_playback_phrase_key = phrase_key
 
         if self.pending_playback_phrase_released:
-            self._queue_playback_chunk(audio, segment_end=segment_end)
+            self._queue_playback_chunk(audio, segment_end=segment_end, force=segment_end)
             if segment_end:
                 self._reset_pending_playback_phrase()
             return
@@ -1534,12 +1545,52 @@ class AudioBridge:
 
     def _playback_catchup_tempo(self) -> float:
         target_samples = max(self.playback_preroll_samples, self.playback_catchup_target_samples)
-        backlog_samples = max(0, len(self.playback_buffer) - target_samples)
+        backlog_samples = max(0, self.playback_ready_samples() - target_samples)
         if backlog_samples <= 0:
             return self.playback_tempo
         ramp_samples = max(self.device_channels, self.playback_catchup_full_backlog_samples)
         catchup = min(1.0, backlog_samples / float(ramp_samples))
         return self.playback_tempo + ((self.playback_max_tempo - self.playback_tempo) * catchup)
+
+    def _prepare_tempo_playback_chunk(
+        self,
+        audio: np.ndarray,
+        segment_end: bool,
+        force: bool = False,
+    ) -> Optional[np.ndarray]:
+        if self.playback_tempo_algorithm == "rubberband":
+            if len(audio) > 0:
+                self.tempo_pending_chunks.append(audio)
+                self.tempo_pending_samples += len(audio)
+            if (
+                self.tempo_pending_samples < self.tempo_preprocess_min_samples
+                and not segment_end
+                and not force
+            ):
+                return None
+            if self.tempo_pending_chunks:
+                audio = (
+                    self.tempo_pending_chunks[0]
+                    if len(self.tempo_pending_chunks) == 1
+                    else np.concatenate(self.tempo_pending_chunks)
+                )
+                self.tempo_pending_chunks = []
+                self.tempo_pending_samples = 0
+            elif len(audio) == 0:
+                return audio
+
+        return self._tempo_adjust_playback_chunk(audio)
+
+    def _tempo_adjust_playback_chunk(self, audio: np.ndarray) -> np.ndarray:
+        input_frames = len(audio) // self.device_channels
+        if input_frames <= 1:
+            return audio
+        tempo = self._playback_catchup_tempo()
+        if tempo <= 1.0001:
+            return audio
+        output_frames = max(1, int(round(input_frames / tempo)))
+        output_samples = output_frames * self.device_channels
+        return self._speed_adjust_playback_slice(audio, output_samples)
 
     def _speed_adjust_playback_slice(self, audio: np.ndarray, output_samples: int) -> np.ndarray:
         if len(audio) == output_samples:
@@ -1626,11 +1677,17 @@ class AudioBridge:
         return np.clip(np.rint(adjusted), -32768, 32767).astype(np.int16).reshape(-1)
 
     def playback_pending_samples(self) -> int:
+        return (
+            self.playback_ready_samples()
+            + sum(len(chunk) for chunk in self.pending_playback_phrase_chunks)
+            + self.tempo_pending_samples
+        )
+
+    def playback_ready_samples(self) -> int:
         queued_samples = 0
         with self.playback_queue.mutex:
             queued_samples = sum(len(chunk.audio) for chunk in self.playback_queue.queue)
-        pending_samples = sum(len(chunk) for chunk in self.pending_playback_phrase_chunks)
-        return len(self.playback_buffer) + queued_samples + pending_samples
+        return len(self.playback_buffer) + queued_samples
 
     def playback_is_drained(self) -> bool:
         return self.playback_pending_samples() == 0
@@ -1805,22 +1862,11 @@ class AudioBridge:
                 self._fill_idle_audio(outdata, frames)
             elif len(self.playback_buffer) >= needed:
                 self.playback_started = True
-                tempo = self._playback_catchup_tempo()
-                consume_samples = needed
-                if tempo > 1.0:
-                    consume_frames = min(
-                        len(self.playback_buffer) // self.device_channels,
-                        max(frames + 1, int(round(frames * tempo))),
-                    )
-                    consume_samples = consume_frames * self.device_channels
-                output_audio = self._speed_adjust_playback_slice(
-                    self.playback_buffer[:consume_samples],
-                    needed,
-                )
+                output_audio = self.playback_buffer[:needed].copy()
                 if not was_playing:
                     self._fade_in(output_audio)
                 outdata[:] = output_audio.reshape(frames, self.device_channels)
-                self._consume_playback_buffer(consume_samples)
+                self._consume_playback_buffer(needed)
                 self._relax_playback_preroll()
             elif first_segment_end is not None and first_segment_end <= len(self.playback_buffer):
                 output_audio = self._idle_audio(needed)
@@ -2912,7 +2958,7 @@ def parse_args():
         ),
         help=(
             "Local tempo algorithm. Use resample for stable live output; "
-            "rubberband is experimental and may distort short live slices."
+            "rubberband is experimental and should be checked with callback debug recordings."
         ),
     )
     parser.add_argument(
