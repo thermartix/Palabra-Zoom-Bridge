@@ -4,6 +4,7 @@
 !.env.example
 *.local.toml
 config.local.toml
+config.toml
 secrets.*
 *.pem
 *.key
