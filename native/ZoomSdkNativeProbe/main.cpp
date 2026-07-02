@@ -16,7 +16,11 @@
 #include "auth_service_interface.h"
 #include "meeting_service_interface.h"
 #include "meeting_service_components/meeting_audio_interface.h"
+#include "meeting_service_components/meeting_interpretation_interface.h"
 #include "meeting_service_components/meeting_participants_ctrl_interface.h"
+#include "meeting_service_components/meeting_raw_archiving_interface.h"
+#include "meeting_service_components/meeting_recording_interface.h"
+#include "meeting_service_components/meeting_talkback_ctrl_interface.h"
 #include "network_connection_handler_interface.h"
 #include "rawdata/rawdata_audio_helper_interface.h"
 #include "rawdata/zoom_rawdata_api.h"
@@ -33,13 +37,18 @@ using ZOOM_SDK_NAMESPACE::IAuthService;
 using ZOOM_SDK_NAMESPACE::IAuthServiceEvent;
 using ZOOM_SDK_NAMESPACE::IMeetingAppSignalHandler;
 using ZOOM_SDK_NAMESPACE::IMeetingAudioController;
+using ZOOM_SDK_NAMESPACE::IMeetingInterpretationController;
 using ZOOM_SDK_NAMESPACE::IMeetingParticipantsController;
+using ZOOM_SDK_NAMESPACE::IMeetingRawArchivingController;
+using ZOOM_SDK_NAMESPACE::IMeetingRecordingController;
 using ZOOM_SDK_NAMESPACE::IMeetingService;
 using ZOOM_SDK_NAMESPACE::IMeetingServiceEvent;
+using ZOOM_SDK_NAMESPACE::IMeetingTalkbackController;
 using ZOOM_SDK_NAMESPACE::INetworkConnectionHandler;
 using ZOOM_SDK_NAMESPACE::INetworkConnectionHelper;
 using ZOOM_SDK_NAMESPACE::IProxySettingHandler;
 using ZOOM_SDK_NAMESPACE::ISSLCertVerificationHandler;
+using ZOOM_SDK_NAMESPACE::IZoomSDKAudioRawDataDelegate;
 using ZOOM_SDK_NAMESPACE::IZoomSDKAudioRawDataHelper;
 using ZOOM_SDK_NAMESPACE::IZoomSDKAudioRawDataSender;
 using ZOOM_SDK_NAMESPACE::IZoomSDKVirtualAudioMicEvent;
@@ -467,6 +476,44 @@ private:
     int lastResult_;
 };
 
+class RawAudioDiagnosticDelegate : public IZoomSDKAudioRawDataDelegate {
+public:
+    RawAudioDiagnosticDelegate()
+        : mixedCount_(0),
+          oneWayCount_(0),
+          shareCount_(0),
+          interpreterCount_(0) {}
+
+    void onMixedAudioRawDataReceived(AudioRawData*) override {
+        LogFirst(mixedCount_, "mixed raw audio received");
+    }
+
+    void onOneWayAudioRawDataReceived(AudioRawData*, uint32_t user_id) override {
+        LogFirst(oneWayCount_, "one-way raw audio received user=" + std::to_string(user_id));
+    }
+
+    void onShareAudioRawDataReceived(AudioRawData*, uint32_t user_id) override {
+        LogFirst(shareCount_, "share raw audio received user=" + std::to_string(user_id));
+    }
+
+    void onOneWayInterpreterAudioRawDataReceived(AudioRawData*, const zchar_t* pLanguageName) override {
+        LogFirst(interpreterCount_, "interpreter raw audio received language=" + WideToUtf8(pLanguageName ? pLanguageName : L""));
+    }
+
+private:
+    void LogFirst(std::atomic<int>& count, const std::string& message) {
+        int previous = count.fetch_add(1);
+        if (previous == 0) {
+            WriteStatus(message);
+        }
+    }
+
+    std::atomic<int> mixedCount_;
+    std::atomic<int> oneWayCount_;
+    std::atomic<int> shareCount_;
+    std::atomic<int> interpreterCount_;
+};
+
 class StingMicEvent : public IZoomSDKVirtualAudioMicEvent {
 public:
     explicit StingMicEvent(bool forceSendOnInitialize)
@@ -600,6 +647,8 @@ int PrintHelp() {
         << "  --sdk-join          Authenticate and attempt to join ZOOM_SDK_MEETING_NUMBER.\n"
         << "  --play-sting        After joining, send a short original test sting into the SDK mic.\n"
         << "  --force-mic-send    Diagnostic: send as soon as the SDK exposes a virtual mic sender.\n"
+        << "  --raw-audio-diagnostics\n"
+        << "                       Log raw recording, archiving, interpretation, talkback, and subscribe state.\n"
         << "  --custom-ui         Initialize the SDK without the default Zoom meeting UI.\n"
         << "  --sdk-root PATH     SDK root, e.g. C:\\dev\\zoom-sdk-windows.\n"
         << "  --timeout SECONDS   SDK call timeout for probe modes. Default: 30.\n"
@@ -629,6 +678,9 @@ int RunChildWithWatchdog(const std::vector<std::wstring>& args, const wchar_t* p
     }
     if (HasArg(args, L"--force-mic-send")) {
         commandLine += L" --force-mic-send";
+    }
+    if (HasArg(args, L"--raw-audio-diagnostics")) {
+        commandLine += L" --raw-audio-diagnostics";
     }
     if (HasArg(args, L"--custom-ui")) {
         commandLine += L" --custom-ui";
@@ -703,6 +755,96 @@ bool WaitForFlag(const std::atomic<bool>& done, int timeoutSeconds) {
         Sleep(10);
     }
     return true;
+}
+
+void RunRawAudioDiagnostics(IMeetingService* meetingService, IZoomSDKAudioRawDataHelper* audioRawHelper, int timeoutSeconds) {
+    WriteStatus("raw audio diagnostics begin");
+
+    IMeetingAudioController* audioController = meetingService->GetMeetingAudioController();
+    if (audioController) {
+        SDKError joinVoipResult = audioController->JoinVoip();
+        WriteStatus("diagnostic JoinVoip returned SDKError " + std::to_string(static_cast<int>(joinVoipResult)));
+        unsigned int selfUserId = 0;
+        IMeetingParticipantsController* participantsController = meetingService->GetMeetingParticipantsController();
+        if (participantsController) {
+            IUserInfo* myself = participantsController->GetMySelfUser();
+            if (myself) {
+                selfUserId = myself->GetUserID();
+                WriteStatus(
+                    "diagnostic self user id=" + std::to_string(selfUserId) +
+                    " muted=" + std::to_string(myself->IsAudioMuted() ? 1 : 0) +
+                    " audio_type=" + std::to_string(static_cast<int>(myself->GetAudioJoinType())));
+            }
+        }
+        if (audioController->CanUnMuteBySelf()) {
+            SDKError unmuteResult = audioController->UnMuteAudio(selfUserId);
+            WriteStatus("diagnostic UnMuteAudio(self) returned SDKError " + std::to_string(static_cast<int>(unmuteResult)));
+        } else {
+            WriteStatus("diagnostic self-unmute is not currently allowed");
+        }
+    } else {
+        WriteStatus("Meeting audio controller was not available for diagnostics");
+    }
+
+    IMeetingRecordingController* recordingController = meetingService->GetMeetingRecordingController();
+    if (recordingController) {
+        SDKError canStartRawRecording = recordingController->CanStartRawRecording();
+        WriteStatus("CanStartRawRecording returned SDKError " + std::to_string(static_cast<int>(canStartRawRecording)));
+        SDKError startRawRecording = recordingController->StartRawRecording();
+        WriteStatus("StartRawRecording returned SDKError " + std::to_string(static_cast<int>(startRawRecording)));
+    } else {
+        WriteStatus("Meeting recording controller was not available");
+    }
+
+    IMeetingRawArchivingController* rawArchivingController = meetingService->GetMeetingRawArchivingController();
+    if (rawArchivingController) {
+        SDKError startRawArchiving = rawArchivingController->StartRawArchiving();
+        WriteStatus("StartRawArchiving returned SDKError " + std::to_string(static_cast<int>(startRawArchiving)));
+    } else {
+        WriteStatus("Meeting raw archiving controller was not available");
+    }
+
+    IMeetingInterpretationController* interpretationController = meetingService->GetMeetingInterpretationController();
+    if (interpretationController) {
+        WriteStatus(
+            "interpretation enabled=" + std::to_string(interpretationController->IsInterpretationEnabled() ? 1 : 0) +
+            " started=" + std::to_string(interpretationController->IsInterpretationStarted() ? 1 : 0) +
+            " self_is_interpreter=" + std::to_string(interpretationController->IsInterpreter() ? 1 : 0));
+    } else {
+        WriteStatus("Meeting interpretation controller was not available");
+    }
+
+    IMeetingTalkbackController* talkbackController = meetingService->GetMeetingTalkbackController();
+    if (talkbackController) {
+        WriteStatus("talkback supported=" + std::to_string(talkbackController->IsMeetingSupportTalkBack() ? 1 : 0));
+    } else {
+        WriteStatus("Meeting talkback controller was not available");
+    }
+
+    RawAudioDiagnosticDelegate rawAudioDelegate;
+    if (audioRawHelper) {
+        SDKError subscribeResult = audioRawHelper->subscribe(&rawAudioDelegate, false);
+        WriteStatus("raw audio subscribe returned SDKError " + std::to_string(static_cast<int>(subscribeResult)));
+        if (subscribeResult == SDKERR_SUCCESS) {
+            int waitSeconds = std::min(5, std::max(1, timeoutSeconds / 12));
+            WriteStatus("waiting " + std::to_string(waitSeconds) + " seconds for raw audio callbacks");
+            DWORD end = GetTickCount() + static_cast<DWORD>(waitSeconds * 1000);
+            while (GetTickCount() < end) {
+                MSG msg;
+                while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+                Sleep(10);
+            }
+            SDKError unsubscribeResult = audioRawHelper->unSubscribe();
+            WriteStatus("raw audio unsubscribe returned SDKError " + std::to_string(static_cast<int>(unsubscribeResult)));
+        }
+    } else {
+        WriteStatus("Audio raw data helper was not available for diagnostics");
+    }
+
+    WriteStatus("raw audio diagnostics end");
 }
 
 bool InitializeSdk(const std::vector<std::wstring>& args, LoadedSdk& sdk) {
@@ -887,6 +1029,8 @@ int RunSdkProbe(const std::vector<std::wstring>& args, bool initialize, bool aut
             IMeetingService* meetingService = nullptr;
             if (joinMeeting) {
                 bool playSting = HasAnyArg(args, L"--play-sting", L"--play-test-sting");
+                bool rawAudioDiagnostics = HasArg(args, L"--raw-audio-diagnostics");
+                bool needsMeetingAudio = playSting || rawAudioDiagnostics;
                 std::wstring meetingNumberRaw = ResolveMeetingNumber();
                 UINT64 meetingNumber = ParseMeetingNumber(meetingNumberRaw);
                 if (meetingNumber == 0) {
@@ -934,7 +1078,7 @@ int RunSdkProbe(const std::vector<std::wstring>& args, bool initialize, bool aut
                 withoutLogin.psw = password.empty() ? nullptr : password.c_str();
                 withoutLogin.app_privilege_token = appPrivilegeToken.empty() ? nullptr : appPrivilegeToken.c_str();
                 withoutLogin.isVideoOff = true;
-                withoutLogin.isAudioOff = !playSting;
+                withoutLogin.isAudioOff = !needsMeetingAudio;
                 withoutLogin.isMyVoiceInMix = false;
                 withoutLogin.isAudioRawDataStereo = false;
                 withoutLogin.eAudioRawdataSamplingRate = ZOOM_SDK_NAMESPACE::AudioRawdataSamplingRate_48K;
@@ -986,6 +1130,10 @@ int RunSdkProbe(const std::vector<std::wstring>& args, bool initialize, bool aut
                 }
 
                 WriteStatus("Meeting join reached " + MeetingStatusName(meetingEvent.lastStatus()));
+
+                if (rawAudioDiagnostics) {
+                    RunRawAudioDiagnostics(meetingService, getAudioRawdataHelper ? getAudioRawdataHelper() : nullptr, ArgIntValue(args, L"--timeout", 30));
+                }
 
                 if (playSting) {
                     IMeetingAudioController* audioController = meetingService->GetMeetingAudioController();

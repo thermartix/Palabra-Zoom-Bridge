@@ -25,6 +25,14 @@ Current state:
   send as soon as the SDK exposes the virtual mic sender. On this machine the SDK
   rejects that early send with `SDKERR_UNKNOWN`, confirming that the raw mic has
   not reached its accepted send state.
+- `--raw-audio-diagnostics` logs the current meeting's raw recording, raw
+  archiving, interpretation, talkback, and raw-audio subscribe state. Diagnostic
+  runs join VoIP and unmute the real self participant before checking raw-audio
+  state. In the live no-interpretation test meeting on this machine, Zoom
+  reported no raw recording permission, raw-audio subscribe was denied with
+  `SDKERR_NO_PERMISSION`, raw archiving returned
+  `SDKERR_MEETING_DONT_SUPPORT_FEATURE`, interpretation was disabled, and
+  talkback was supported.
 - `ZOOM_SDK_APP_PRIVILEGE_TOKEN` can be set when Zoom requires a separate app
   privilege token. The SDK auth JWT is not used for that join field.
 - Raw audio subscription and interpreter/talkback output are the next steps after
@@ -50,4 +58,5 @@ Test through Python:
 & "C:\Users\marti\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --mode sdk-probe --zoom-sdk-meeting-number 123456789 --zoom-sdk-probe-seconds 1 --zoom-sdk-root C:\dev\zoom-sdk-windows --zoom-sdk-adapter-module modules.zoom_sdk_process_adapter --zoom-sdk-adapter-command native\ZoomSdkNativeProbe\bin\x64\Release\ZoomSdkNativeProbe.exe --zoom-sdk-adapter-args --sdk-auth --timeout 60
 & "C:\Users\marti\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --mode sdk-probe --zoom-sdk-meeting-number 123456789 --zoom-sdk-probe-seconds 1 --zoom-sdk-root C:\dev\zoom-sdk-windows --zoom-sdk-adapter-module modules.zoom_sdk_process_adapter --zoom-sdk-adapter-command native\ZoomSdkNativeProbe\bin\x64\Release\ZoomSdkNativeProbe.exe --zoom-sdk-adapter-args --sdk-join --timeout 60
 & "C:\Users\marti\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --mode sdk-probe --zoom-sdk-meeting-number 123456789 --zoom-sdk-probe-seconds 1 --zoom-sdk-root C:\dev\zoom-sdk-windows --zoom-sdk-adapter-module modules.zoom_sdk_process_adapter --zoom-sdk-adapter-command native\ZoomSdkNativeProbe\bin\x64\Release\ZoomSdkNativeProbe.exe --zoom-sdk-adapter-args --sdk-join --play-sting --custom-ui --timeout 120
+& "C:\Users\marti\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --mode sdk-probe --zoom-sdk-meeting-number 123456789 --zoom-sdk-probe-seconds 1 --zoom-sdk-root C:\dev\zoom-sdk-windows --zoom-sdk-adapter-module modules.zoom_sdk_process_adapter --zoom-sdk-adapter-command native\ZoomSdkNativeProbe\bin\x64\Release\ZoomSdkNativeProbe.exe --zoom-sdk-adapter-args --sdk-join --custom-ui --raw-audio-diagnostics --timeout 120
 ```
