@@ -1,6 +1,6 @@
 # Palabra Zoom Bridge
 
-Version: 0.3.18
+Version: 0.3.19
 
 Local MVP bridge for one Zoom interpretation channel:
 
@@ -218,3 +218,21 @@ If device names are ambiguous, use numeric ids from `--list-devices`:
 6. Start the bridge after the bot's Zoom speaker/microphone devices are set.
 
 Guests should then select German in Zoom's Interpretation menu.
+
+## 9. Internal architecture
+
+The bridge is split into small modules so the current virtual-cable mode can stay
+as a fallback while SDK-based multilang support is added:
+
+- `palabra_zoom.py` is the CLI entrypoint and lifecycle orchestrator.
+- `palabra_client.py` owns Palabra session, websocket, task, and message helpers.
+- `palabra_agent.py` models one Palabra worker for one target language. The
+  current cable mode creates one agent; multilang mode can create one per target.
+- `transports/cable.py` contains the existing VB-Cable audio path and diagnostics.
+- `transports/base.py` defines the minimal transport shape for cable and future
+  Zoom SDK transports.
+- `audio_utils.py`, `debug_recording.py`, `config.py`, `zoom_desktop.py`, and
+  `system_power.py` hold shared helpers that used to live in the entrypoint.
+
+Phase II should add a `transports/zoom_sdk.py` implementation, then have the
+orchestrator select either the cable transport or the SDK transport from config.
