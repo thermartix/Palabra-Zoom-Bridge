@@ -39,7 +39,7 @@ from scipy.signal import resample_poly
 SESSION_URL = "https://api.palabra.ai/session-storage/session"
 SESSIONS_URL = "https://api.palabra.ai/session-storage/sessions"
 APP_NAME = "Palabra Zoom Bridge"
-__version__ = "0.3.14"
+__version__ = "0.3.15"
 APP_VERSION = __version__
 CONFIG_PATH = Path("config.toml")
 LOG_DIR = Path("logs")
@@ -2910,7 +2910,10 @@ def parse_args():
             DEFAULT_PLAYBACK_TEMPO_ALGORITHM,
             "bridge.playback_tempo_algorithm",
         ),
-        help="Local tempo algorithm: resample changes pitch, rubberband preserves pitch better. Overrides config.toml.",
+        help=(
+            "Local tempo algorithm. Use resample for stable live output; "
+            "rubberband is experimental and may distort short live slices."
+        ),
     )
     parser.add_argument(
         "--playback-fade-ms",
