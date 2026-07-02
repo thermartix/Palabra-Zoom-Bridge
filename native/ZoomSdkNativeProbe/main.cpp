@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "auth_service_interface.h"
+#include "meeting_service_interface.h"
 #include "network_connection_handler_interface.h"
 #include "zoom_sdk.h"
 
@@ -25,6 +26,9 @@ using ZOOM_SDK_NAMESPACE::AUTHRET_SUCCESS;
 using ZOOM_SDK_NAMESPACE::IAccountInfo;
 using ZOOM_SDK_NAMESPACE::IAuthService;
 using ZOOM_SDK_NAMESPACE::IAuthServiceEvent;
+using ZOOM_SDK_NAMESPACE::IMeetingAppSignalHandler;
+using ZOOM_SDK_NAMESPACE::IMeetingService;
+using ZOOM_SDK_NAMESPACE::IMeetingServiceEvent;
 using ZOOM_SDK_NAMESPACE::INetworkConnectionHandler;
 using ZOOM_SDK_NAMESPACE::INetworkConnectionHelper;
 using ZOOM_SDK_NAMESPACE::IProxySettingHandler;
@@ -33,8 +37,21 @@ using ZOOM_SDK_NAMESPACE::InitParam;
 using ZOOM_SDK_NAMESPACE::LANGUAGE_English;
 using ZOOM_SDK_NAMESPACE::LoginFailReason;
 using ZOOM_SDK_NAMESPACE::LOGINSTATUS;
+using ZOOM_SDK_NAMESPACE::ConnectionQuality;
+using ZOOM_SDK_NAMESPACE::JoinParam;
+using ZOOM_SDK_NAMESPACE::JoinParam4WithoutLogin;
+using ZOOM_SDK_NAMESPACE::MEETING_STATUS_ENDED;
+using ZOOM_SDK_NAMESPACE::MEETING_STATUS_FAILED;
+using ZOOM_SDK_NAMESPACE::MEETING_STATUS_INMEETING;
+using ZOOM_SDK_NAMESPACE::MEETING_STATUS_IN_WAITING_ROOM;
+using ZOOM_SDK_NAMESPACE::MEETING_STATUS_WAITINGFORHOST;
+using ZOOM_SDK_NAMESPACE::MeetingComponentType;
+using ZOOM_SDK_NAMESPACE::MeetingParameter;
+using ZOOM_SDK_NAMESPACE::MeetingStatus;
+using ZOOM_SDK_NAMESPACE::SDK_UT_WITHOUT_LOGIN;
 using ZOOM_SDK_NAMESPACE::SDKERR_SUCCESS;
 using ZOOM_SDK_NAMESPACE::SDKError;
+using ZOOM_SDK_NAMESPACE::StatisticsWarningType;
 using ZOOM_SDK_NAMESPACE::ZoomSDKRawDataMemoryModeHeap;
 #if defined(WIN32)
 using ZOOM_SDK_NAMESPACE::SDKNotificationServiceError;
@@ -46,6 +63,8 @@ typedef SDKError (*InitSDKFn)(InitParam&);
 typedef SDKError (*CleanUPSDKFn)();
 typedef SDKError (*CreateAuthServiceFn)(IAuthService**);
 typedef SDKError (*DestroyAuthServiceFn)(IAuthService*);
+typedef SDKError (*CreateMeetingServiceFn)(IMeetingService**);
+typedef SDKError (*DestroyMeetingServiceFn)(IMeetingService*);
 typedef SDKError (*CreateNetworkConnectionHelperFn)(INetworkConnectionHelper**);
 typedef SDKError (*DestroyNetworkConnectionHelperFn)(INetworkConnectionHelper*);
 
@@ -89,6 +108,10 @@ void WriteError(const std::string& message) {
 void WriteDone() {
     std::cout << "{\"type\":\"done\"}" << std::endl;
     std::cout.flush();
+}
+
+void FastExit(unsigned int code) {
+    TerminateProcess(GetCurrentProcess(), code);
 }
 
 std::wstring Utf8ToWide(const std::string& value) {
@@ -203,6 +226,32 @@ std::wstring ResolveSdkRoot(const std::vector<std::wstring>& args) {
 
 std::wstring ResolveAuthToken() {
     return EnvWide(L"ZOOM_SDK_AUTH_TOKEN");
+}
+
+std::wstring ResolveMeetingNumber() {
+    return EnvWide(L"ZOOM_SDK_MEETING_NUMBER");
+}
+
+std::wstring ResolveMeetingPassword() {
+    return EnvWide(L"ZOOM_SDK_PASSWORD");
+}
+
+std::wstring ResolveDisplayName() {
+    std::wstring name = EnvWide(L"ZOOM_SDK_DISPLAY_NAME");
+    return name.empty() ? L"Palabra SDK Probe" : name;
+}
+
+UINT64 ParseMeetingNumber(const std::wstring& value) {
+    std::wstring digits;
+    for (wchar_t ch : value) {
+        if (ch >= L'0' && ch <= L'9') {
+            digits.push_back(ch);
+        }
+    }
+    if (digits.empty()) {
+        return 0;
+    }
+    return static_cast<UINT64>(_wcstoui64(digits.c_str(), nullptr, 10));
 }
 
 std::wstring ResolveSdkBin(const std::wstring& root) {
@@ -320,12 +369,90 @@ private:
     std::atomic<bool> proxyDone_;
 };
 
+std::string MeetingStatusName(MeetingStatus status) {
+    switch (status) {
+    case ZOOM_SDK_NAMESPACE::MEETING_STATUS_IDLE: return "idle";
+    case ZOOM_SDK_NAMESPACE::MEETING_STATUS_CONNECTING: return "connecting";
+    case ZOOM_SDK_NAMESPACE::MEETING_STATUS_WAITINGFORHOST: return "waiting_for_host";
+    case ZOOM_SDK_NAMESPACE::MEETING_STATUS_INMEETING: return "in_meeting";
+    case ZOOM_SDK_NAMESPACE::MEETING_STATUS_DISCONNECTING: return "disconnecting";
+    case ZOOM_SDK_NAMESPACE::MEETING_STATUS_RECONNECTING: return "reconnecting";
+    case ZOOM_SDK_NAMESPACE::MEETING_STATUS_FAILED: return "failed";
+    case ZOOM_SDK_NAMESPACE::MEETING_STATUS_ENDED: return "ended";
+    case ZOOM_SDK_NAMESPACE::MEETING_STATUS_LOCKED: return "locked";
+    case ZOOM_SDK_NAMESPACE::MEETING_STATUS_UNLOCKED: return "unlocked";
+    case ZOOM_SDK_NAMESPACE::MEETING_STATUS_IN_WAITING_ROOM: return "in_waiting_room";
+    default: return "status_" + std::to_string(static_cast<int>(status));
+    }
+}
+
+class MeetingEvent : public IMeetingServiceEvent {
+public:
+    MeetingEvent() : done_(false), reachedMeeting_(false), lastStatus_(ZOOM_SDK_NAMESPACE::MEETING_STATUS_IDLE), lastResult_(0) {}
+
+    void onMeetingStatusChanged(MeetingStatus status, int result = 0) override {
+        WriteStatus(
+            "meeting status=" + MeetingStatusName(status) +
+            " result=" + std::to_string(result));
+        if (done_.load()) {
+            return;
+        }
+        lastStatus_ = status;
+        lastResult_ = result;
+        if (status == MEETING_STATUS_INMEETING) {
+            reachedMeeting_.store(true);
+            done_.store(true);
+        } else if (status == MEETING_STATUS_WAITINGFORHOST || status == MEETING_STATUS_IN_WAITING_ROOM) {
+            reachedMeeting_.store(true);
+            done_.store(true);
+        } else if (status == MEETING_STATUS_FAILED || status == MEETING_STATUS_ENDED) {
+            done_.store(true);
+        }
+    }
+
+    void onMeetingStatisticsWarningNotification(StatisticsWarningType) override {}
+    void onMeetingParameterNotification(const MeetingParameter*) override {}
+    void onSuspendParticipantsActivities() override {}
+    void onAICompanionActiveChangeNotice(bool) override {}
+    void onMeetingTopicChanged(const zchar_t*) override {}
+    void onMeetingFullToWatchLiveStream(const zchar_t*) override {
+        WriteStatus("meeting is full; livestream callback received");
+    }
+    void onUserNetworkStatusChanged(MeetingComponentType, ConnectionQuality, unsigned int, bool) override {}
+#if defined(WIN32)
+    void onAppSignalPanelUpdated(IMeetingAppSignalHandler*) override {}
+#endif
+
+    const std::atomic<bool>& done() const {
+        return done_;
+    }
+
+    bool reachedMeeting() const {
+        return reachedMeeting_.load();
+    }
+
+    MeetingStatus lastStatus() const {
+        return lastStatus_;
+    }
+
+    int lastResult() const {
+        return lastResult_;
+    }
+
+private:
+    std::atomic<bool> done_;
+    std::atomic<bool> reachedMeeting_;
+    MeetingStatus lastStatus_;
+    int lastResult_;
+};
+
 int PrintHelp() {
     std::cerr
         << "ZoomSdkNativeProbe\n"
         << "  --sdk-info          Load sdk.dll and print the SDK version.\n"
         << "  --sdk-init          Load sdk.dll and call InitSDK/CleanUPSDK.\n"
         << "  --sdk-auth          Initialize SDK and authenticate with ZOOM_SDK_AUTH_TOKEN.\n"
+        << "  --sdk-join          Authenticate and attempt to join ZOOM_SDK_MEETING_NUMBER.\n"
         << "  --sdk-root PATH     SDK root, e.g. C:\\dev\\zoom-sdk-windows.\n"
         << "  --timeout SECONDS   SDK call timeout for probe modes. Default: 30.\n"
         << "\n"
@@ -400,6 +527,10 @@ int RunAuthWithWatchdog(const std::vector<std::wstring>& args) {
     return RunChildWithWatchdog(args, L"--sdk-auth", L"--sdk-auth-child");
 }
 
+int RunJoinWithWatchdog(const std::vector<std::wstring>& args) {
+    return RunChildWithWatchdog(args, L"--sdk-join", L"--sdk-join-child");
+}
+
 bool WaitForFlag(const std::atomic<bool>& done, int timeoutSeconds) {
     DWORD start = GetTickCount();
     DWORD timeoutMs = static_cast<DWORD>(timeoutSeconds) * 1000;
@@ -444,7 +575,7 @@ bool InitializeSdk(const std::vector<std::wstring>& args, LoadedSdk& sdk) {
     return true;
 }
 
-int RunSdkProbe(const std::vector<std::wstring>& args, bool initialize, bool authenticate) {
+int RunSdkProbe(const std::vector<std::wstring>& args, bool initialize, bool authenticate, bool joinMeeting) {
     std::wstring root = ResolveSdkRoot(args);
     if (root.empty()) {
         WriteError("Missing SDK root. Set zoom_sdk.sdk_root, pass --sdk-root, or set ZOOM_MEETING_SDK_ROOT.");
@@ -474,7 +605,7 @@ int RunSdkProbe(const std::vector<std::wstring>& args, bool initialize, bool aut
     const zchar_t* version = getVersion();
     WriteStatus("Zoom SDK version " + WideToUtf8(version ? version : L""));
 
-    if (initialize || authenticate) {
+    if (initialize || authenticate || joinMeeting) {
         CleanUPSDKFn cleanupSdk = reinterpret_cast<CleanUPSDKFn>(sdk.proc("CleanUPSDK"));
         if (!cleanupSdk) {
             WriteError("sdk.dll did not expose CleanUPSDK.");
@@ -485,13 +616,19 @@ int RunSdkProbe(const std::vector<std::wstring>& args, bool initialize, bool aut
             return 2;
         }
 
-        if (authenticate) {
+        if (authenticate || joinMeeting) {
             CreateAuthServiceFn createAuthService = reinterpret_cast<CreateAuthServiceFn>(sdk.proc("CreateAuthService"));
             DestroyAuthServiceFn destroyAuthService = reinterpret_cast<DestroyAuthServiceFn>(sdk.proc("DestroyAuthService"));
+            CreateMeetingServiceFn createMeetingService = reinterpret_cast<CreateMeetingServiceFn>(sdk.proc("CreateMeetingService"));
+            DestroyMeetingServiceFn destroyMeetingService = reinterpret_cast<DestroyMeetingServiceFn>(sdk.proc("DestroyMeetingService"));
             CreateNetworkConnectionHelperFn createNetworkHelper = reinterpret_cast<CreateNetworkConnectionHelperFn>(sdk.proc("CreateNetworkConnectionHelper"));
             DestroyNetworkConnectionHelperFn destroyNetworkHelper = reinterpret_cast<DestroyNetworkConnectionHelperFn>(sdk.proc("DestroyNetworkConnectionHelper"));
             if (!createAuthService || !destroyAuthService) {
                 WriteError("sdk.dll did not expose CreateAuthService/DestroyAuthService.");
+                return 2;
+            }
+            if (joinMeeting && (!createMeetingService || !destroyMeetingService)) {
+                WriteError("sdk.dll did not expose CreateMeetingService/DestroyMeetingService.");
                 return 2;
             }
             if (!createNetworkHelper || !destroyNetworkHelper) {
@@ -580,6 +717,114 @@ int RunSdkProbe(const std::vector<std::wstring>& args, bool initialize, bool aut
             }
 
             WriteStatus("SDK authentication succeeded");
+
+            IMeetingService* meetingService = nullptr;
+            if (joinMeeting) {
+                std::wstring meetingNumberRaw = ResolveMeetingNumber();
+                UINT64 meetingNumber = ParseMeetingNumber(meetingNumberRaw);
+                if (meetingNumber == 0) {
+                    WriteError("ZOOM_SDK_MEETING_NUMBER is required for --sdk-join.");
+                    destroyAuthService(authService);
+                    if (networkHelper) {
+                        networkHelper->UnRegisterNetworkConnectionHandler();
+                        destroyNetworkHelper(networkHelper);
+                    }
+                    return 2;
+                }
+
+                SDKError meetingCreateResult = createMeetingService(&meetingService);
+                if (meetingCreateResult != SDKERR_SUCCESS || !meetingService) {
+                    WriteError("CreateMeetingService failed with SDKError " + std::to_string(static_cast<int>(meetingCreateResult)) + ".");
+                    destroyAuthService(authService);
+                    if (networkHelper) {
+                        networkHelper->UnRegisterNetworkConnectionHandler();
+                        destroyNetworkHelper(networkHelper);
+                    }
+                    return 2;
+                }
+
+                MeetingEvent meetingEvent;
+                SDKError meetingEventResult = meetingService->SetEvent(&meetingEvent);
+                if (meetingEventResult != SDKERR_SUCCESS) {
+                    WriteError("IMeetingService::SetEvent failed with SDKError " + std::to_string(static_cast<int>(meetingEventResult)) + ".");
+                    destroyMeetingService(meetingService);
+                    destroyAuthService(authService);
+                    if (networkHelper) {
+                        networkHelper->UnRegisterNetworkConnectionHandler();
+                        destroyNetworkHelper(networkHelper);
+                    }
+                    return 2;
+                }
+
+                std::wstring displayName = ResolveDisplayName();
+                std::wstring password = ResolveMeetingPassword();
+                std::wstring token = ResolveAuthToken();
+                JoinParam joinParam;
+                joinParam.userType = SDK_UT_WITHOUT_LOGIN;
+                JoinParam4WithoutLogin& withoutLogin = joinParam.param.withoutloginuserJoin;
+                withoutLogin.meetingNumber = meetingNumber;
+                withoutLogin.userName = displayName.c_str();
+                withoutLogin.psw = password.empty() ? nullptr : password.c_str();
+                withoutLogin.app_privilege_token = token.c_str();
+                withoutLogin.isVideoOff = true;
+                withoutLogin.isAudioOff = true;
+                withoutLogin.isMyVoiceInMix = false;
+                withoutLogin.isAudioRawDataStereo = false;
+                withoutLogin.eAudioRawdataSamplingRate = ZOOM_SDK_NAMESPACE::AudioRawdataSamplingRate_48K;
+
+                WriteStatus("calling Join meeting=" + WideToUtf8(meetingNumberRaw) + " display_name=" + WideToUtf8(displayName));
+                SDKError joinResult = meetingService->Join(joinParam);
+                if (joinResult != SDKERR_SUCCESS) {
+                    WriteError("Join call failed with SDKError " + std::to_string(static_cast<int>(joinResult)) + ".");
+                    destroyMeetingService(meetingService);
+                    destroyAuthService(authService);
+                    if (networkHelper) {
+                        networkHelper->UnRegisterNetworkConnectionHandler();
+                        destroyNetworkHelper(networkHelper);
+                    }
+                    return 2;
+                }
+
+                int joinTimeoutSeconds = std::max(1, ArgIntValue(args, L"--timeout", 30) - proxyTimeoutSeconds);
+                if (!WaitForFlag(meetingEvent.done(), joinTimeoutSeconds)) {
+                    WriteError("Meeting join status did not complete within " + std::to_string(joinTimeoutSeconds) + " seconds.");
+                    if (HasArg(args, L"--skip-cleanup")) {
+                        FastExit(3);
+                    }
+                    meetingService->Leave(ZOOM_SDK_NAMESPACE::LEAVE_MEETING);
+                    destroyMeetingService(meetingService);
+                    destroyAuthService(authService);
+                    if (networkHelper) {
+                        networkHelper->UnRegisterNetworkConnectionHandler();
+                        destroyNetworkHelper(networkHelper);
+                    }
+                    return 3;
+                }
+
+                if (!meetingEvent.reachedMeeting()) {
+                    WriteError(
+                        "Meeting join did not reach a usable meeting state; last status=" +
+                        MeetingStatusName(meetingEvent.lastStatus()) +
+                        " result=" + std::to_string(meetingEvent.lastResult()) + ".");
+                    if (HasArg(args, L"--skip-cleanup")) {
+                        FastExit(2);
+                    }
+                    destroyMeetingService(meetingService);
+                    destroyAuthService(authService);
+                    if (networkHelper) {
+                        networkHelper->UnRegisterNetworkConnectionHandler();
+                        destroyNetworkHelper(networkHelper);
+                    }
+                    return 2;
+                }
+
+                WriteStatus("Meeting join reached " + MeetingStatusName(meetingEvent.lastStatus()));
+                meetingService->Leave(ZOOM_SDK_NAMESPACE::LEAVE_MEETING);
+            }
+
+            if (meetingService) {
+                destroyMeetingService(meetingService);
+            }
             destroyAuthService(authService);
             if (networkHelper) {
                 networkHelper->UnRegisterNetworkConnectionHandler();
@@ -589,7 +834,7 @@ int RunSdkProbe(const std::vector<std::wstring>& args, bool initialize, bool aut
 
         if (HasArg(args, L"--skip-cleanup")) {
             WriteDone();
-            ExitProcess(0);
+            FastExit(0);
         }
         cleanupSdk();
         WriteStatus("CleanUPSDK completed");
@@ -619,18 +864,26 @@ int wmain(int argc, wchar_t* argv[]) {
         return RunAuthWithWatchdog(args);
     }
 
+    if (HasArg(args, L"--sdk-join")) {
+        return RunJoinWithWatchdog(args);
+    }
+
     if (HasArg(args, L"--sdk-init-child")) {
-        return RunSdkProbe(args, true, false);
+        FastExit(RunSdkProbe(args, true, false, false));
     }
 
     if (HasArg(args, L"--sdk-auth-child")) {
-        return RunSdkProbe(args, false, true);
+        FastExit(RunSdkProbe(args, false, true, false));
+    }
+
+    if (HasArg(args, L"--sdk-join-child")) {
+        FastExit(RunSdkProbe(args, false, true, true));
     }
 
     if (HasArg(args, L"--sdk-info") || args.empty()) {
-        return RunSdkProbe(args, false, false);
+        return RunSdkProbe(args, false, false, false);
     }
 
-    WriteError("Unknown mode. Use --sdk-info, --sdk-init, --sdk-auth, or --help.");
+    WriteError("Unknown mode. Use --sdk-info, --sdk-init, --sdk-auth, --sdk-join, or --help.");
     return 2;
 }
