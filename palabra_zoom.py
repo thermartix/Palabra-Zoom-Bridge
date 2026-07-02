@@ -38,7 +38,7 @@ from scipy.signal import resample_poly
 SESSION_URL = "https://api.palabra.ai/session-storage/session"
 SESSIONS_URL = "https://api.palabra.ai/session-storage/sessions"
 APP_NAME = "Palabra Zoom Bridge"
-__version__ = "0.3.3"
+__version__ = "0.3.4"
 APP_VERSION = __version__
 CONFIG_PATH = Path("config.toml")
 LOG_DIR = Path("logs")
@@ -1310,13 +1310,15 @@ class AudioBridge:
         self.api_input_recorder: Optional[Mp3DebugRecorder] = None
         self.api_output_recorder: Optional[Mp3DebugRecorder] = None
         self.device_output_recorder: Optional[Mp3DebugRecorder] = None
-        self.callback_output_recorder: Optional[AsyncMp3DebugRecorder] = None
+        self.callback_output_recorder: Optional[Mp3DebugRecorder] = None
         self.debug_text_logger: Optional[DebugTextLogger] = None
         self.first_source_transcription_time: Optional[float] = None
         self.last_no_output_warning = 0.0
         self.last_capture_drop_notice = 0.0
+        self.last_no_capture_notice = 0.0
         self.last_playback_drop_notice = 0.0
         self.last_playback_hold_notice = 0.0
+        self.first_input_audio_sent = False
         self.playback_partial_holds = 0
         self.stop_reason = ""
 
@@ -1739,6 +1741,13 @@ class AudioBridge:
             try:
                 device_audio = self.capture_queue.get(timeout=0.1)
             except queue.Empty:
+                now = time.monotonic()
+                if now - self.last_no_capture_notice >= 10:
+                    print(
+                        "[capture] waiting for Zoom audio from the selected speaker cable...",
+                        flush=True,
+                    )
+                    self.last_no_capture_notice = now
                 await asyncio.sleep(0.001)
                 continue
 
@@ -1763,6 +1772,9 @@ class AudioBridge:
                         }
                     )
                 )
+                if not self.first_input_audio_sent:
+                    print("[capture] sending Zoom audio to Palabra.", flush=True)
+                    self.first_input_audio_sent = True
                 next_send_time = max(next_send_time + send_interval_sec, time.monotonic())
 
     def _dump_palabra_message_shape(self, msg_type: str, data: dict) -> None:
@@ -2144,7 +2156,10 @@ async def monitor_zoom_meeting_window(
 
         if visible:
             if not seen_meeting:
-                print(f"Detected Zoom meeting window: {title}", flush=True)
+                print(
+                    f"Detected Zoom meeting window: {title}. Bridge is live; waiting for meeting audio.",
+                    flush=True,
+                )
             seen_meeting = True
             missing_since = None
         elif seen_meeting:
@@ -2178,7 +2193,7 @@ async def run(args) -> None:
     api_input_recorder: Optional[Mp3DebugRecorder] = None
     api_output_recorder: Optional[Mp3DebugRecorder] = None
     device_output_recorder: Optional[Mp3DebugRecorder] = None
-    callback_output_recorder: Optional[AsyncMp3DebugRecorder] = None
+    callback_output_recorder: Optional[Mp3DebugRecorder] = None
     debug_text_logger: Optional[DebugTextLogger] = None
     try:
         try:
@@ -2204,7 +2219,7 @@ async def run(args) -> None:
                     args.device_rate,
                     args.device_channels,
                 ).__enter__()
-                callback_output_recorder = AsyncMp3DebugRecorder(
+                callback_output_recorder = Mp3DebugRecorder(
                     Path("debug") / f"zoom_mic_callback_{timestamp}.mp3",
                     args.device_rate,
                     args.device_channels,

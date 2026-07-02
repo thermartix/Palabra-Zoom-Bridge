@@ -1,6 +1,6 @@
 # Palabra Zoom Bridge
 
-Version: 0.3.3
+Version: 0.3.4
 
 Local MVP bridge for one Zoom interpretation channel:
 
