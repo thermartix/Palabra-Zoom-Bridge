@@ -9,6 +9,8 @@ Current state:
   `InitSDK`. This is verified with Zoom Meeting SDK `7.1.0 (41845)`. The child
   skips immediate cleanup because `CleanUPSDK` currently does not return
   reliably in this smoke-test shape.
+- `--sdk-auth` initializes the SDK, waits for proxy detection, and authenticates
+  with `ZOOM_SDK_AUTH_TOKEN`.
 - Meeting join, raw audio subscription, and interpreter/talkback output are the
   next steps.
 
@@ -29,4 +31,5 @@ Test through Python:
 
 ```powershell
 & "C:\Users\marti\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --mode sdk-probe --zoom-sdk-meeting-number 123456789 --zoom-sdk-probe-seconds 1 --zoom-sdk-root C:\dev\zoom-sdk-windows --zoom-sdk-adapter-module modules.zoom_sdk_process_adapter --zoom-sdk-adapter-command native\ZoomSdkNativeProbe\bin\x64\Release\ZoomSdkNativeProbe.exe --zoom-sdk-adapter-args --sdk-info
+& "C:\Users\marti\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --mode sdk-probe --zoom-sdk-meeting-number 123456789 --zoom-sdk-probe-seconds 1 --zoom-sdk-root C:\dev\zoom-sdk-windows --zoom-sdk-adapter-module modules.zoom_sdk_process_adapter --zoom-sdk-adapter-command native\ZoomSdkNativeProbe\bin\x64\Release\ZoomSdkNativeProbe.exe --zoom-sdk-adapter-args --sdk-auth --timeout 60
 ```

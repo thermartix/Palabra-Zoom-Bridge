@@ -18,6 +18,7 @@ def create_meeting_sdk_jwt(
     *,
     role: int = 0,
     ttl_seconds: int = 7200,
+    include_meeting_claims: bool = False,
 ) -> str:
     if not client_id:
         raise ValueError("Zoom SDK client ID is required.")
@@ -29,12 +30,13 @@ def create_meeting_sdk_jwt(
     header = {"alg": "HS256", "typ": "JWT"}
     payload = {
         "appKey": client_id,
-        "mn": str(meeting_number),
-        "role": int(role),
         "iat": issued_at,
         "exp": expires_at,
         "tokenExp": expires_at,
     }
+    if include_meeting_claims:
+        payload["mn"] = str(meeting_number)
+        payload["role"] = int(role)
     encoded_header = _base64url(json.dumps(header, separators=(",", ":")).encode("utf-8"))
     encoded_payload = _base64url(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
     signing_input = f"{encoded_header}.{encoded_payload}".encode("ascii")

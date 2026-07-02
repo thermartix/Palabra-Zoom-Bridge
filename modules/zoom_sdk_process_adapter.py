@@ -66,7 +66,8 @@ async def run_probe(settings, audio_callback: AudioCallback) -> None:
             try:
                 message = json.loads(line)
             except json.JSONDecodeError as exc:
-                raise RuntimeError(f"SDK adapter emitted invalid JSON: {line[:160]!r}") from exc
+                print(f"[zoom sdk adapter] {line}", flush=True)
+                continue
 
             message_type = message.get("type")
             if message_type == "status":
