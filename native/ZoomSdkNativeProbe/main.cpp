@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <iostream>
+#include <mutex>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -27,6 +28,7 @@
 #include "rawdata/rawdata_audio_helper_interface.h"
 #include "rawdata/zoom_rawdata_api.h"
 #include "setting_service_interface.h"
+#include "zoom_sdk_raw_data_def.h"
 #include "zoom_sdk.h"
 
 namespace {
@@ -99,6 +101,8 @@ typedef SDKError (*CreateSettingServiceFn)(ISettingService**);
 typedef SDKError (*DestroySettingServiceFn)(ISettingService*);
 typedef IZoomSDKAudioRawDataHelper* (*GetAudioRawdataHelperFn)();
 
+std::mutex g_stdoutMutex;
+
 std::string JsonEscape(const std::string& value) {
     std::ostringstream out;
     for (char ch : value) {
@@ -123,6 +127,7 @@ std::string JsonEscape(const std::string& value) {
 }
 
 void WriteMessage(const char* type, const std::string& message) {
+    std::lock_guard<std::mutex> lock(g_stdoutMutex);
     std::cout << "{\"type\":\"" << type << "\",\"message\":\""
               << JsonEscape(message) << "\"}" << std::endl;
     std::cout.flush();
@@ -137,7 +142,38 @@ void WriteError(const std::string& message) {
 }
 
 void WriteDone() {
+    std::lock_guard<std::mutex> lock(g_stdoutMutex);
     std::cout << "{\"type\":\"done\"}" << std::endl;
+    std::cout.flush();
+}
+
+std::string Base64Encode(const unsigned char* data, unsigned int length) {
+    static const char table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string encoded;
+    encoded.reserve(((length + 2) / 3) * 4);
+    for (unsigned int index = 0; index < length; index += 3) {
+        unsigned int value = static_cast<unsigned int>(data[index]) << 16;
+        if (index + 1 < length) {
+            value |= static_cast<unsigned int>(data[index + 1]) << 8;
+        }
+        if (index + 2 < length) {
+            value |= static_cast<unsigned int>(data[index + 2]);
+        }
+
+        encoded.push_back(table[(value >> 18) & 0x3f]);
+        encoded.push_back(table[(value >> 12) & 0x3f]);
+        encoded.push_back(index + 1 < length ? table[(value >> 6) & 0x3f] : '=');
+        encoded.push_back(index + 2 < length ? table[value & 0x3f] : '=');
+    }
+    return encoded;
+}
+
+void WriteAudio(unsigned int sampleRate, unsigned int channels, const char* buffer, unsigned int length) {
+    std::string encoded = Base64Encode(reinterpret_cast<const unsigned char*>(buffer), length);
+    std::lock_guard<std::mutex> lock(g_stdoutMutex);
+    std::cout << "{\"type\":\"audio\",\"sample_rate\":" << sampleRate
+              << ",\"channels\":" << channels
+              << ",\"pcm_s16le_base64\":\"" << encoded << "\"}" << std::endl;
     std::cout.flush();
 }
 
@@ -246,6 +282,19 @@ int ArgIntValue(const std::vector<std::wstring>& args, const wchar_t* name, int 
         return fallback;
     }
     return static_cast<int>(value);
+}
+
+double EnvDoubleValue(const wchar_t* name, double fallback) {
+    std::wstring raw = EnvWide(name);
+    if (raw.empty()) {
+        return fallback;
+    }
+    wchar_t* end = nullptr;
+    double value = std::wcstod(raw.c_str(), &end);
+    if (end == raw.c_str() || value <= 0.0 || value > 3600.0) {
+        return fallback;
+    }
+    return value;
 }
 
 std::wstring ResolveSdkRoot(const std::vector<std::wstring>& args) {
@@ -529,6 +578,59 @@ private:
     std::atomic<int> interpreterCount_;
 };
 
+class RawAudioProbeDelegate : public IZoomSDKAudioRawDataDelegate {
+public:
+    RawAudioProbeDelegate()
+        : mixedCount_(0),
+          oneWayCount_(0),
+          shareCount_(0),
+          interpreterCount_(0) {}
+
+    void onMixedAudioRawDataReceived(AudioRawData* data) override {
+        EmitAudio(data, mixedCount_, "mixed raw audio streaming");
+    }
+
+    void onOneWayAudioRawDataReceived(AudioRawData*, uint32_t user_id) override {
+        LogFirst(oneWayCount_, "one-way raw audio ignored user=" + std::to_string(user_id));
+    }
+
+    void onShareAudioRawDataReceived(AudioRawData*, uint32_t user_id) override {
+        LogFirst(shareCount_, "share raw audio ignored user=" + std::to_string(user_id));
+    }
+
+    void onOneWayInterpreterAudioRawDataReceived(AudioRawData*, const zchar_t* pLanguageName) override {
+        LogFirst(interpreterCount_, "interpreter raw audio ignored language=" + WideToUtf8(pLanguageName ? pLanguageName : L""));
+    }
+
+    int mixedCount() const {
+        return mixedCount_.load();
+    }
+
+private:
+    void EmitAudio(AudioRawData* data, std::atomic<int>& count, const std::string& firstMessage) {
+        if (!data || !data->GetBuffer() || data->GetBufferLen() == 0) {
+            return;
+        }
+        int previous = count.fetch_add(1);
+        if (previous == 0) {
+            WriteStatus(firstMessage);
+        }
+        WriteAudio(data->GetSampleRate(), data->GetChannelNum(), data->GetBuffer(), data->GetBufferLen());
+    }
+
+    void LogFirst(std::atomic<int>& count, const std::string& message) {
+        int previous = count.fetch_add(1);
+        if (previous == 0) {
+            WriteStatus(message);
+        }
+    }
+
+    std::atomic<int> mixedCount_;
+    std::atomic<int> oneWayCount_;
+    std::atomic<int> shareCount_;
+    std::atomic<int> interpreterCount_;
+};
+
 class TalkbackDiagnosticEvent : public IMeetingTalkbackCtrlEvent {
 public:
     TalkbackDiagnosticEvent()
@@ -749,6 +851,7 @@ int PrintHelp() {
         << "  --force-mic-send    Diagnostic: send as soon as the SDK exposes a virtual mic sender.\n"
         << "  --raw-audio-diagnostics\n"
         << "                       Log raw recording, archiving, interpretation, talkback, and subscribe state.\n"
+        << "  --raw-audio-probe   Subscribe to mixed meeting raw audio and emit JSON PCM audio messages.\n"
         << "  --talkback-sting    Create a talkback channel and send the original test sting through it.\n"
         << "  --list-sdk-mics     Log microphones visible to the Zoom SDK.\n"
         << "  --sdk-mic NAME      Select a Zoom SDK microphone by name substring before joining.\n"
@@ -785,6 +888,9 @@ int RunChildWithWatchdog(const std::vector<std::wstring>& args, const wchar_t* p
     }
     if (HasArg(args, L"--raw-audio-diagnostics")) {
         commandLine += L" --raw-audio-diagnostics";
+    }
+    if (HasArg(args, L"--raw-audio-probe")) {
+        commandLine += L" --raw-audio-probe";
     }
     if (HasArg(args, L"--talkback-sting")) {
         commandLine += L" --talkback-sting";
@@ -963,6 +1069,71 @@ void RunRawAudioDiagnostics(IMeetingService* meetingService, IZoomSDKAudioRawDat
     }
 
     WriteStatus("raw audio diagnostics end");
+}
+
+bool PrepareRawAudioReceive(IMeetingService* meetingService) {
+    IMeetingAudioController* audioController = meetingService->GetMeetingAudioController();
+    if (audioController) {
+        SDKError joinVoipResult = audioController->JoinVoip();
+        WriteStatus("raw audio probe JoinVoip returned SDKError " + std::to_string(static_cast<int>(joinVoipResult)));
+    } else {
+        WriteStatus("Meeting audio controller was not available for raw audio probe");
+    }
+
+    IMeetingRecordingController* recordingController = meetingService->GetMeetingRecordingController();
+    if (recordingController) {
+        SDKError canStartRawRecording = recordingController->CanStartRawRecording();
+        WriteStatus("raw audio probe CanStartRawRecording returned SDKError " + std::to_string(static_cast<int>(canStartRawRecording)));
+        SDKError startRawRecording = recordingController->StartRawRecording();
+        WriteStatus("raw audio probe StartRawRecording returned SDKError " + std::to_string(static_cast<int>(startRawRecording)));
+    } else {
+        WriteStatus("Meeting recording controller was not available for raw audio probe");
+    }
+
+    IMeetingRawArchivingController* rawArchivingController = meetingService->GetMeetingRawArchivingController();
+    if (rawArchivingController) {
+        SDKError startRawArchiving = rawArchivingController->StartRawArchiving();
+        WriteStatus("raw audio probe StartRawArchiving returned SDKError " + std::to_string(static_cast<int>(startRawArchiving)));
+    } else {
+        WriteStatus("Meeting raw archiving controller was not available for raw audio probe");
+    }
+    return true;
+}
+
+bool RunRawAudioProbe(IMeetingService* meetingService, IZoomSDKAudioRawDataHelper* audioRawHelper) {
+    WriteStatus("raw audio probe begin");
+    if (!audioRawHelper) {
+        WriteError("Audio raw data helper was not available for raw audio probe.");
+        return false;
+    }
+
+    PrepareRawAudioReceive(meetingService);
+
+    RawAudioProbeDelegate rawAudioDelegate;
+    SDKError subscribeResult = audioRawHelper->subscribe(&rawAudioDelegate, false);
+    WriteStatus("raw audio probe subscribe returned SDKError " + std::to_string(static_cast<int>(subscribeResult)));
+    if (subscribeResult != SDKERR_SUCCESS) {
+        WriteError("Raw audio probe could not subscribe to meeting audio.");
+        return false;
+    }
+
+    double probeSeconds = EnvDoubleValue(L"ZOOM_SDK_PROBE_SECONDS", 10.0);
+    WriteStatus("raw audio probe streaming for " + std::to_string(probeSeconds) + " seconds");
+    DWORD end = GetTickCount() + static_cast<DWORD>(probeSeconds * 1000.0);
+    while (GetTickCount() < end) {
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        Sleep(10);
+    }
+
+    SDKError unsubscribeResult = audioRawHelper->unSubscribe();
+    WriteStatus("raw audio probe unsubscribe returned SDKError " + std::to_string(static_cast<int>(unsubscribeResult)));
+    WriteStatus("raw audio probe mixed callback count=" + std::to_string(rawAudioDelegate.mixedCount()));
+    WriteStatus("raw audio probe end");
+    return rawAudioDelegate.mixedCount() > 0;
 }
 
 bool SendGeneratedTalkbackSting(IMeetingTalkbackController* talkbackController, const std::wstring& channelId) {
@@ -1274,7 +1445,15 @@ int RunSdkProbe(const std::vector<std::wstring>& args, bool initialize, bool aut
                 WriteError("sdk.dll did not expose CreateSettingService/DestroySettingService.");
                 return 2;
             }
-            if (joinMeeting && HasAnyArg(args, L"--play-sting", L"--play-test-sting") && !getAudioRawdataHelper) {
+            if (
+                joinMeeting
+                && (
+                    HasAnyArg(args, L"--play-sting", L"--play-test-sting")
+                    || HasArg(args, L"--raw-audio-probe")
+                    || HasArg(args, L"--raw-audio-diagnostics")
+                )
+                && !getAudioRawdataHelper
+            ) {
                 WriteError("sdk.dll did not expose GetAudioRawdataHelper.");
                 return 2;
             }
@@ -1369,9 +1548,10 @@ int RunSdkProbe(const std::vector<std::wstring>& args, bool initialize, bool aut
             if (joinMeeting) {
                 bool playSting = HasAnyArg(args, L"--play-sting", L"--play-test-sting");
                 bool rawAudioDiagnostics = HasArg(args, L"--raw-audio-diagnostics");
+                bool rawAudioProbe = HasArg(args, L"--raw-audio-probe");
                 bool talkbackSting = HasArg(args, L"--talkback-sting");
                 bool cableMicProbe = !ArgValue(args, L"--sdk-mic").empty() || ArgIntValue(args, L"--hold-seconds", 0) > 0;
-                bool needsMeetingAudio = playSting || rawAudioDiagnostics || talkbackSting || cableMicProbe;
+                bool needsMeetingAudio = playSting || rawAudioDiagnostics || rawAudioProbe || talkbackSting || cableMicProbe;
                 std::wstring meetingNumberRaw = ResolveMeetingNumber();
                 UINT64 meetingNumber = ParseMeetingNumber(meetingNumberRaw);
                 if (meetingNumber == 0) {
@@ -1524,6 +1704,21 @@ int RunSdkProbe(const std::vector<std::wstring>& args, bool initialize, bool aut
 
                 if (rawAudioDiagnostics) {
                     RunRawAudioDiagnostics(meetingService, getAudioRawdataHelper ? getAudioRawdataHelper() : nullptr, ArgIntValue(args, L"--timeout", 30));
+                }
+
+                if (rawAudioProbe) {
+                    if (!RunRawAudioProbe(meetingService, getAudioRawdataHelper ? getAudioRawdataHelper() : nullptr)) {
+                        if (HasArg(args, L"--skip-cleanup")) {
+                            FastExit(2);
+                        }
+                        destroyMeetingService(meetingService);
+                        destroyAuthService(authService);
+                        if (networkHelper) {
+                            networkHelper->UnRegisterNetworkConnectionHandler();
+                            destroyNetworkHelper(networkHelper);
+                        }
+                        return 2;
+                    }
                 }
 
                 if (talkbackSting) {

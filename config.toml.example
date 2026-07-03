@@ -68,6 +68,8 @@ probe_seconds = 10.0
 output_wav = "debug/zoom_sdk_probe.wav"
 sample_rate = 48000
 channels = 1
+play_local = false
+local_output_device = ""
 # Adapter module contract:
 # - run_probe(settings, audio_callback), or
 # - create_adapter(settings, audio_callback).run_probe()

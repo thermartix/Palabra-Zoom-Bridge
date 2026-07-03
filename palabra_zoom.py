@@ -91,6 +91,8 @@ async def run_sdk_probe(args) -> None:
         sdk_root=args.zoom_sdk_root,
         adapter_args=tuple(args.zoom_sdk_adapter_args),
         dry_run=args.zoom_sdk_dry_run,
+        play_local=args.zoom_sdk_play_local,
+        local_output_device=args.zoom_sdk_local_output_device,
         auth_token=auth_token,
     )
     print("Running Zoom SDK audio probe.")
@@ -500,6 +502,27 @@ def parse_args():
             "zoom_sdk.dry_run",
         ),
         help="Generate a test WAV without joining Zoom; useful for verifying sdk-probe plumbing.",
+    )
+    parser.add_argument(
+        "--zoom-sdk-play-local",
+        action=argparse.BooleanOptionalAction,
+        default=config_bool(
+            zoom_sdk,
+            "play_local",
+            False,
+            "zoom_sdk.play_local",
+        ),
+        help="Play SDK probe PCM to a local speaker while also writing the probe WAV.",
+    )
+    parser.add_argument(
+        "--zoom-sdk-local-output-device",
+        default=config_string(
+            zoom_sdk,
+            "local_output_device",
+            "",
+            "zoom_sdk.local_output_device",
+        ),
+        help="Optional local speaker/output device id or name substring for --zoom-sdk-play-local.",
     )
     parser.add_argument(
         "--input-device",

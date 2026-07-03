@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
 import numpy as np
+import sounddevice as sd
 
 
 AudioCallback = Callable[[bytes, int, int], Awaitable[None] | None]
@@ -27,6 +28,8 @@ class ZoomSdkProbeSettings:
     adapter_command: str
     sdk_root: str
     dry_run: bool
+    play_local: bool = False
+    local_output_device: str = ""
     adapter_args: tuple[str, ...] = ()
     auth_token: str = ""
 
@@ -71,6 +74,61 @@ class ZoomSdkProbeRecorder:
             self._file = None
 
 
+class ZoomSdkLocalPlayer:
+    def __init__(self, sample_rate: int, channels: int, output_device: str = "") -> None:
+        self.sample_rate = sample_rate
+        self.channels = channels
+        self.output_device = output_device
+        self._stream: Optional[sd.RawOutputStream] = None
+
+    def __enter__(self) -> "ZoomSdkLocalPlayer":
+        device = self._resolve_output_device(self.output_device) if self.output_device else None
+        self._stream = sd.RawOutputStream(
+            device=device,
+            samplerate=self.sample_rate,
+            channels=self.channels,
+            dtype="int16",
+            latency="high",
+        )
+        self._stream.start()
+        target = "default local speaker" if device is None else f"output device {device}"
+        print(f"Playing Zoom SDK probe audio to {target}.", flush=True)
+        return self
+
+    async def write(self, audio: bytes, sample_rate: int, channels: int) -> None:
+        if sample_rate != self.sample_rate or channels != self.channels:
+            raise ValueError(
+                "SDK local playback audio format changed during capture: "
+                f"expected {self.sample_rate} Hz/{self.channels} ch, "
+                f"got {sample_rate} Hz/{channels} ch."
+            )
+        if self._stream is None:
+            raise RuntimeError("SDK local playback stream is not open.")
+        self._stream.write(audio)
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._stream is not None:
+            self._stream.stop()
+            self._stream.close()
+            self._stream = None
+
+    @staticmethod
+    def _resolve_output_device(selector: str) -> int:
+        if selector.strip().isdigit():
+            return int(selector)
+        selector_lower = selector.lower()
+        matches = []
+        for idx, device in enumerate(sd.query_devices()):
+            if int(device.get("max_output_channels", 0)) > 0 and selector_lower in device["name"].lower():
+                matches.append((idx, device["name"]))
+        if not matches:
+            raise SystemExit(f"No local output device matched {selector!r}. Run with --list-devices.")
+        if len(matches) > 1:
+            names = ", ".join(f"{idx}: {name}" for idx, name in matches)
+            raise SystemExit(f"Multiple local output devices matched {selector!r}: {names}")
+        return matches[0][0]
+
+
 class ZoomSdkTransport:
     """Minimal Zoom SDK audio-capture probe.
 
@@ -89,10 +147,30 @@ class ZoomSdkTransport:
             self.settings.sample_rate,
             self.settings.channels,
         ) as recorder:
-            if self.settings.dry_run:
-                await self._run_dry_probe(recorder.write)
-            else:
-                await self._run_adapter_probe(recorder.write)
+            player_context = (
+                ZoomSdkLocalPlayer(
+                    self.settings.sample_rate,
+                    self.settings.channels,
+                    self.settings.local_output_device,
+                )
+                if self.settings.play_local
+                else None
+            )
+            player = player_context.__enter__() if player_context is not None else None
+
+            async def write_probe_audio(audio: bytes, sample_rate: int, channels: int) -> None:
+                await recorder.write(audio, sample_rate, channels)
+                if player is not None:
+                    await player.write(audio, sample_rate, channels)
+
+            try:
+                if self.settings.dry_run:
+                    await self._run_dry_probe(write_probe_audio)
+                else:
+                    await self._run_adapter_probe(write_probe_audio)
+            finally:
+                if player_context is not None:
+                    player_context.__exit__(None, None, None)
 
             seconds = recorder.bytes_written / max(
                 1,

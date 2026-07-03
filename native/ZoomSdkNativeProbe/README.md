@@ -35,6 +35,11 @@ Current state:
   `SDKERR_NO_PERMISSION`, raw archiving returned
   `SDKERR_MEETING_DONT_SUPPORT_FEATURE`, interpretation was disabled, and
   talkback was supported.
+- `--raw-audio-probe` is the first SDK input-path probe for Palabra. It joins
+  VoIP, attempts Zoom's raw recording/raw archiving gates, subscribes to mixed
+  meeting raw audio, and emits JSON `audio` messages with base64 PCM for the
+  Python process adapter. Pair it with Python's `--zoom-sdk-play-local` to hear
+  the meeting audio locally before wiring Palabra.
 - `--talkback-sting` probes the SDK's direct talkback PCM path. It creates a
   talkback channel, invites the first other participant who supports talkback,
   and sends a short original 48 kHz mono PCM test sting with
@@ -73,4 +78,5 @@ Test through Python:
 & "C:\Users\marti\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --mode sdk-probe --zoom-sdk-meeting-number 123456789 --zoom-sdk-probe-seconds 1 --zoom-sdk-root C:\dev\zoom-sdk-windows --zoom-sdk-adapter-module modules.zoom_sdk_process_adapter --zoom-sdk-adapter-command native\ZoomSdkNativeProbe\bin\x64\Release\ZoomSdkNativeProbe.exe --zoom-sdk-adapter-args --sdk-join --play-sting --custom-ui --timeout 120
 & "C:\Users\marti\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --mode sdk-probe --zoom-sdk-meeting-number 123456789 --zoom-sdk-probe-seconds 1 --zoom-sdk-root C:\dev\zoom-sdk-windows --zoom-sdk-adapter-module modules.zoom_sdk_process_adapter --zoom-sdk-adapter-command native\ZoomSdkNativeProbe\bin\x64\Release\ZoomSdkNativeProbe.exe --zoom-sdk-adapter-args --sdk-join --custom-ui --raw-audio-diagnostics --timeout 120
 & "C:\Users\marti\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --mode sdk-probe --zoom-sdk-meeting-number 123456789 --zoom-sdk-probe-seconds 1 --zoom-sdk-root C:\dev\zoom-sdk-windows --zoom-sdk-adapter-module modules.zoom_sdk_process_adapter --zoom-sdk-adapter-command native\ZoomSdkNativeProbe\bin\x64\Release\ZoomSdkNativeProbe.exe --zoom-sdk-adapter-args --sdk-join --custom-ui --talkback-sting --timeout 120
+& "C:\Users\marti\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --mode sdk-probe --zoom-sdk-play-local --zoom-sdk-meeting-number 123456789 --zoom-sdk-probe-seconds 10 --zoom-sdk-root C:\dev\zoom-sdk-windows --zoom-sdk-adapter-module modules.zoom_sdk_process_adapter --zoom-sdk-adapter-command native\ZoomSdkNativeProbe\bin\x64\Release\ZoomSdkNativeProbe.exe --zoom-sdk-adapter-args --sdk-join --custom-ui --raw-audio-probe --timeout 120
 ```
