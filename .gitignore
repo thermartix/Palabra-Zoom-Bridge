@@ -29,6 +29,7 @@ env/
 # Runtime diagnostics and recordings
 debug/
 logs/
+config_snapshots/
 *.log
 
 # Native helper build output
