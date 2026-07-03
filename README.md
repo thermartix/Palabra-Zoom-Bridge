@@ -1,6 +1,6 @@
 # Palabra Zoom Bridge
 
-Version: 0.3.36
+Version: 0.3.37
 
 Local MVP bridge for one Zoom interpretation channel:
 
@@ -34,6 +34,11 @@ The Zoom SDK values are used only by `sdk-probe` mode and must stay local.
 Set the default language pair, audio devices, and timing settings in `config.toml`:
 
 ```toml
+[app]
+# Use "cable" for the current virtual-cable bridge. Use "sdk-probe" only for
+# Zoom Meeting SDK diagnostics.
+mode = "cable"
+
 [translation]
 source_language = "es"
 target_language = "de"
@@ -98,6 +103,8 @@ record_debug_mp3 = false
 ```
 
 `voice_id` is optional. When set, the bridge passes it through to Palabra speech generation for the interpreted audio.
+
+The app defaults to `mode = "cable"`, so the normal bridge uses the virtual-cable path unless you run with `--mode sdk-probe` or set `[app] mode = "sdk-probe"` in `config.toml`.
 
 `channels` controls the Palabra websocket input format. Palabra websocket output is handled as fixed 24 kHz mono audio, per the API contract, and is then resampled/remixed for the local cable. `device_channels` controls the local Windows virtual cable streams. The proven-good setup keeps Palabra input mono and writes stereo into Zoom's microphone cable, which prevents silent interpretation audio with VB-Cable endpoints that appear as multi-channel DirectSound devices.
 

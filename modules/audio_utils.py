@@ -6,6 +6,7 @@ from fractions import Fraction
 import numpy as np
 from scipy.signal import resample_poly
 
+@dataclasses.dataclass(frozen=True)
 class PlaybackChunk:
     audio: np.ndarray
     segment_end: bool = False
