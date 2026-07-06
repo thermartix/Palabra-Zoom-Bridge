@@ -17,7 +17,7 @@ Build with Visual Studio Build Tools:
 Test through Python:
 
 ```powershell
-& "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --mode sdk-probe --zoom-sdk-meeting-number 123456789 --zoom-sdk-probe-seconds 1 --zoom-sdk-adapter-module modules.zoom_sdk_process_adapter --zoom-sdk-adapter-command native\ZoomSdkProbe\bin\Release\ZoomSdkProbe.exe --zoom-sdk-adapter-args --simulate
+& "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" -E palabra_zoom.py --mode sdk-probe --zoom-sdk-meeting-number 123456789 --zoom-sdk-probe-seconds 1 --zoom-sdk-adapter-module modules.zoom_sdk_process_adapter --zoom-sdk-adapter-command native\ZoomSdkProbe\bin\Release\ZoomSdkProbe.exe --zoom-sdk-adapter-args --simulate
 ```
 
 The `--zoom-sdk-adapter-args` option must be last because every value after it is

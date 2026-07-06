@@ -1,6 +1,6 @@
 # Palabra Zoom Bridge
 
-Version: 0.3.39
+Version: 0.3.41
 
 Local MVP bridge for one Zoom interpretation channel:
 
@@ -21,6 +21,10 @@ Create or rebuild the shared virtual environment with:
 ```powershell
 & "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" -m pip install -r requirements.txt
 ```
+
+`Zoom_tlumoceni.bat` starts through `launch_palabra_zoom.py`, which checks the
+required Python packages and installs any missing packages from
+`requirements.txt` before starting the bridge.
 
 Install `ffmpeg` and make sure it is available on `PATH` if you want MP3 debug recordings.
 
@@ -141,7 +145,7 @@ You can override any of these defaults on the command line for a single run, for
 ## 4. List audio devices
 
 ```powershell
-& "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --list-devices
+& "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" -E palabra_zoom.py --list-devices
 ```
 
 Look for the VB-Audio devices. You should see each virtual cable on more than one Windows audio backend, usually including `Windows DirectSound`, `MME`, and sometimes `Windows WDM-KS`. WASAPI may also appear, but this bridge blocks it on this bot PC.
@@ -175,7 +179,7 @@ The bridge records from the matching recording side:
 With Zoom open on the bot account, set Zoom's microphone to `CABLE-A Output`, then play a test tone into that cable:
 
 ```powershell
-& "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --test-output "CABLE-A Input"
+& "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" -E palabra_zoom.py --test-output "CABLE-A Input"
 ```
 
 Zoom's microphone meter should move.
@@ -183,7 +187,7 @@ Zoom's microphone meter should move.
 Next, set Zoom's speaker to `CABLE-B Input`, play meeting audio in Zoom, and meter the matching recording side:
 
 ```powershell
-& "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --meter-input "CABLE-B Output"
+& "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" -E palabra_zoom.py --meter-input "CABLE-B Output"
 ```
 
 The level meter should move when Spanish audio is audible in Zoom.
@@ -191,19 +195,19 @@ The level meter should move when Spanish audio is audible in Zoom.
 ## 7. Start the bridge
 
 ```powershell
-& "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py
+& "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" -E palabra_zoom.py
 ```
 
 To start the bridge with MP3 debug recording enabled for this run:
 
 ```powershell
-& "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --record-debug-mp3
+& "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" -E palabra_zoom.py --record-debug-mp3
 ```
 
 To test audio-device selection without starting a Palabra session:
 
 ```powershell
-& "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --check-devices
+& "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" -E palabra_zoom.py --check-devices
 ```
 
 The bridge writes debugging files to `logs/`:
@@ -218,13 +222,13 @@ To check whether Palabra is sending timing or phrase metadata with the stream, a
 Override configured values for a single run:
 
 ```powershell
-& "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --input-device "CABLE-B Output" --output-device "CABLE-A Input" --source-language es --target-language en
+& "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" -E palabra_zoom.py --input-device "CABLE-B Output" --output-device "CABLE-A Input" --source-language es --target-language en
 ```
 
 If device names are ambiguous, use numeric ids from `--list-devices`:
 
 ```powershell
-& "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --input-device <input-id> --output-device <output-id>
+& "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" -E palabra_zoom.py --input-device <input-id> --output-device <output-id>
 ```
 
 ## 8. Zoom meeting flow
@@ -244,6 +248,7 @@ The bridge is split into small modules so the current virtual-cable mode can sta
 as a fallback while SDK-based multilang support is added:
 
 - `palabra_zoom.py` is the CLI entrypoint and lifecycle orchestrator.
+- `launch_palabra_zoom.py` checks shared-venv dependencies before starting the bridge.
 - `modules/palabra_client.py` owns Palabra session, websocket, task, and message helpers.
 - `modules/palabra_agent.py` models one Palabra worker for one target language. The
   current cable mode creates one agent; multilang mode can create one per target.
@@ -266,7 +271,7 @@ audio adapter can join a meeting and deliver PCM audio into this app.
 Dry-run the probe recorder without Zoom:
 
 ```powershell
-& "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --mode sdk-probe --zoom-sdk-dry-run --zoom-sdk-probe-seconds 3
+& "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" -E palabra_zoom.py --mode sdk-probe --zoom-sdk-dry-run --zoom-sdk-probe-seconds 3
 ```
 
 That writes a generated test tone to `debug/zoom_sdk_probe.wav`.
@@ -305,7 +310,7 @@ plays the received PCM through the default Windows speaker, or through
 `zoom_sdk.local_output_device` when configured:
 
 ```powershell
-& "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --mode sdk-probe --zoom-sdk-dry-run --zoom-sdk-play-local --zoom-sdk-probe-seconds 3
+& "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" -E palabra_zoom.py --mode sdk-probe --zoom-sdk-dry-run --zoom-sdk-play-local --zoom-sdk-probe-seconds 3
 ```
 
 For a real Zoom meeting audio test, build `ZoomSdkNativeProbe`, configure
@@ -314,7 +319,7 @@ For a real Zoom meeting audio test, build `ZoomSdkNativeProbe`, configure
 `zoom_sdk.adapter_command` to the native helper executable. Then run:
 
 ```powershell
-& "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --mode sdk-probe --zoom-sdk-play-local --zoom-sdk-adapter-args --sdk-join --custom-ui --raw-audio-probe --timeout 120
+& "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" -E palabra_zoom.py --mode sdk-probe --zoom-sdk-play-local --zoom-sdk-adapter-args --sdk-join --custom-ui --raw-audio-probe --timeout 120
 ```
 
 The native raw-audio probe joins VoIP, attempts Zoom's raw recording/raw
@@ -357,7 +362,7 @@ Build it with Visual Studio Build Tools:
 Then test the Python process adapter through the helper simulator:
 
 ```powershell
-& "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --mode sdk-probe --zoom-sdk-meeting-number 123456789 --zoom-sdk-probe-seconds 1 --zoom-sdk-adapter-module modules.zoom_sdk_process_adapter --zoom-sdk-adapter-command native\ZoomSdkProbe\bin\Release\ZoomSdkProbe.exe --zoom-sdk-adapter-args --simulate
+& "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" -E palabra_zoom.py --mode sdk-probe --zoom-sdk-meeting-number 123456789 --zoom-sdk-probe-seconds 1 --zoom-sdk-adapter-module modules.zoom_sdk_process_adapter --zoom-sdk-adapter-command native\ZoomSdkProbe\bin\Release\ZoomSdkProbe.exe --zoom-sdk-adapter-args --simulate
 ```
 
 A C++ helper project lives in `native/ZoomSdkNativeProbe`. This is the real
@@ -380,7 +385,7 @@ Verify SDK loading directly:
 Or through the Python process adapter:
 
 ```powershell
-& "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" palabra_zoom.py --mode sdk-probe --zoom-sdk-meeting-number 123456789 --zoom-sdk-probe-seconds 1 --zoom-sdk-root C:\dev\zoom-sdk-windows --zoom-sdk-adapter-module modules.zoom_sdk_process_adapter --zoom-sdk-adapter-command native\ZoomSdkNativeProbe\bin\x64\Release\ZoomSdkNativeProbe.exe --zoom-sdk-adapter-args --sdk-info
+& "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" -E palabra_zoom.py --mode sdk-probe --zoom-sdk-meeting-number 123456789 --zoom-sdk-probe-seconds 1 --zoom-sdk-root C:\dev\zoom-sdk-windows --zoom-sdk-adapter-module modules.zoom_sdk_process_adapter --zoom-sdk-adapter-command native\ZoomSdkNativeProbe\bin\x64\Release\ZoomSdkNativeProbe.exe --zoom-sdk-adapter-args --sdk-info
 ```
 
 `--sdk-init` runs SDK initialization in a guarded child process,
