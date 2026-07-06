@@ -1,6 +1,6 @@
 # Palabra Zoom Bridge
 
-Version: 0.3.38
+Version: 0.3.39
 
 Local MVP bridge for one Zoom interpretation channel:
 
@@ -9,6 +9,14 @@ Zoom Spanish audio -> VB cable -> Python bridge -> Palabra -> VB cable -> Zoom G
 ```
 
 ## 1. Install Python dependencies
+
+This project uses a shared Python runtime at `C:\dev\Python\pythoncore-3.14-64`
+so the launcher can run from multiple Windows accounts on the same machine.
+Create or rebuild the shared virtual environment with:
+
+```powershell
+& "C:\dev\Python\pythoncore-3.14-64\python.exe" -m venv C:\dev\.venvs\palabra_zoom
+```
 
 ```powershell
 & "C:\dev\.venvs\palabra_zoom\Scripts\python.exe" -m pip install -r requirements.txt
