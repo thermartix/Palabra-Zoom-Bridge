@@ -1,0 +1,1 @@
+"C:\dev\.venvs\palabra_zoom\Scripts\python.exe" "C:\dev\Palabra Zoom\palabra_zoom.py"
