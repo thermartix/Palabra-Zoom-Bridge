@@ -111,9 +111,11 @@ async def run(args) -> None:
     if not client_id or not client_secret:
         raise SystemExit("Set PALABRA_CLIENT_ID and PALABRA_CLIENT_SECRET in .env or the environment.")
 
-    source_language, target_language, voice_id = resolve_translation_settings(args)
+    source_language, target_language, voice_id, voice_cloning = resolve_translation_settings(args)
     print(f"Translation:   {language_label(source_language)} -> {language_label(target_language)}")
-    if voice_id:
+    if voice_cloning:
+        print("Voice cloning: enabled (configured voice_id is ignored)")
+    elif voice_id:
         print(f"Voice ID:      {voice_id}")
 
     keep_awake_enabled = keep_windows_awake()
@@ -189,6 +191,7 @@ async def run(args) -> None:
                 source_language=source_language,
                 target_language=target_language,
                 voice_id=voice_id,
+                voice_cloning=voice_cloning,
                 api_rate=args.api_rate,
                 channels=args.channels,
                 segment_confirmation_silence_threshold=args.segment_confirmation_silence_threshold,
@@ -624,7 +627,18 @@ def parse_args():
     parser.add_argument(
         "--voice-id",
         default=config_optional_string(translation, "voice_id", "translation.voice_id"),
-        help="Palabra voice id. Overrides config.toml.",
+        help="Palabra voice id. Ignored when voice cloning is enabled.",
+    )
+    parser.add_argument(
+        "--voice-cloning",
+        action=argparse.BooleanOptionalAction,
+        default=config_bool(
+            translation,
+            "voice_cloning",
+            False,
+            "translation.voice_cloning",
+        ),
+        help="Clone live speaker voices; when enabled, the configured voice id is ignored.",
     )
     parser.add_argument(
         "--device-rate",

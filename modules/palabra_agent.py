@@ -12,6 +12,7 @@ class PalabraAgentSettings:
     source_language: str
     target_language: str
     voice_id: Optional[str]
+    voice_cloning: bool
     api_rate: int
     channels: int
     segment_confirmation_silence_threshold: float
@@ -47,6 +48,7 @@ class PalabraAgent:
             source_language=self.settings.source_language,
             target_language=self.settings.target_language,
             voice_id=self.settings.voice_id,
+            voice_cloning=self.settings.voice_cloning,
             api_rate=self.settings.api_rate,
             channels=self.settings.channels,
             segment_confirmation_silence_threshold=(

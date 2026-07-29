@@ -7,6 +7,9 @@ mode = "cable"
 source_language = "es"
 target_language = "en"
 voice_id = "your-voice-id"
+# Experimental: clone live speaker voices after they have spoken long enough.
+# When true, voice_id is ignored.
+voice_cloning = false
 
 [zoom]
 # These are the devices selected inside Zoom. The bridge uses the matching

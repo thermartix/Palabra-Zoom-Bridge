@@ -61,6 +61,7 @@ async def configure_translation(
     source_language: str,
     target_language: str,
     voice_id: Optional[str],
+    voice_cloning: bool,
     api_rate: int,
     channels: int,
     segment_confirmation_silence_threshold: float,
@@ -74,7 +75,11 @@ async def configure_translation(
     max_tempo: float,
 ) -> None:
     speech_generation = {}
-    if voice_id:
+    # Palabra requires voice cloning and a fixed voice ID to be mutually
+    # exclusive. Voice cloning intentionally takes precedence when enabled.
+    if voice_cloning:
+        speech_generation["voice_cloning"] = True
+    elif voice_id:
         speech_generation["voice_id"] = voice_id
 
     settings = {

@@ -1,6 +1,6 @@
 # Palabra Zoom Bridge
 
-Version: 0.3.41
+Version: 0.3.42
 
 Local MVP bridge for one Zoom interpretation channel:
 
@@ -55,6 +55,9 @@ mode = "cable"
 source_language = "es"
 target_language = "de"
 voice_id = "your-voice-id"
+# Experimental: clone live speaker voices after they have spoken long enough.
+# When true, voice_id is ignored.
+voice_cloning = false
 
 [zoom]
 # Copy these from Zoom's Speaker and Microphone settings. The bridge uses the
@@ -114,7 +117,7 @@ test_volume = 0.5
 record_debug_mp3 = false
 ```
 
-`voice_id` is optional. When set, the bridge passes it through to Palabra speech generation for the interpreted audio.
+`voice_id` is optional. When set, the bridge passes it through to Palabra speech generation for the interpreted audio. Set `voice_cloning = true` to ask Palabra to mimic the live speakers instead. Voice cloning is experimental, may need 10–20 seconds of speech before a speaker's cloned voice is applied, and always takes precedence over `voice_id`. Use `--voice-cloning` or `--no-voice-cloning` to override the TOML setting for one run.
 
 The app defaults to `mode = "cable"`, so the normal bridge uses the virtual-cable path unless you run with `--mode sdk-probe` or set `[app] mode = "sdk-probe"` in `config.toml`.
 

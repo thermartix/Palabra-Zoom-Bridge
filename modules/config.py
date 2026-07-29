@@ -197,9 +197,10 @@ def config_bool_with_aliases(
     return value
 
 
-def resolve_translation_settings(args) -> tuple[str, str, Optional[str]]:
+def resolve_translation_settings(args) -> tuple[str, str, Optional[str], bool]:
     source_language = args.source_language
     target_language = args.target_language
     voice_id = args.voice_id
+    voice_cloning = args.voice_cloning
 
-    return source_language, target_language, voice_id
+    return source_language, target_language, voice_id, voice_cloning
