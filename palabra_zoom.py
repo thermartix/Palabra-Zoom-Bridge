@@ -766,8 +766,8 @@ def parse_args():
             "bridge.playback_tempo_algorithm",
         ),
         help=(
-            "Local tempo algorithm. Use resample for stable live output; "
-            "rubberband is experimental and should be checked with callback debug recordings."
+            "Tempo control mode. Use palabra to skip local speed adjustment, resample for "
+            "stable local catch-up, or experimental rubberband for pitch-preserving catch-up."
         ),
     )
     parser.add_argument(

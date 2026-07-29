@@ -35,6 +35,7 @@ playback_buffer_ms = 300
 phrase_start_buffer_ms = 1200
 playback_tempo = 1.075
 playback_max_tempo = 1.15
+# Use "palabra" to disable local speed adjustment and rely on [palabra] auto_tempo.
 playback_tempo_algorithm = "resample"
 playback_fade_ms = 5
 output_peak_limit = 0.65

@@ -779,6 +779,10 @@ class AudioBridge:
         segment_end: bool,
         force: bool = False,
     ) -> Optional[np.ndarray]:
+        # In Palabra-managed mode, preserve the returned audio timing exactly
+        # and rely on the API translation queue's auto_tempo configuration.
+        if self.playback_tempo_algorithm == "palabra":
+            return audio
         if self.playback_tempo_algorithm == "rubberband":
             if len(audio) > 0:
                 self.tempo_pending_chunks.append(audio)

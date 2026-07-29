@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 APP_NAME = "Palabra Zoom Bridge"
-__version__ = "0.3.42"
+__version__ = "0.3.43"
 APP_VERSION = __version__
 CONFIG_PATH = Path("config.toml")
 LOG_DIR = Path("logs")
@@ -75,7 +75,7 @@ PLAYBACK_CATCHUP_FULL_BACKLOG_MS = 4000
 DEFAULT_PLAYBACK_TEMPO = 1.0
 DEFAULT_PLAYBACK_MAX_LOCAL_TEMPO = 1.06
 DEFAULT_PLAYBACK_TEMPO_ALGORITHM = "resample"
-PLAYBACK_TEMPO_ALGORITHMS = {"resample", "rubberband"}
+PLAYBACK_TEMPO_ALGORITHMS = {"palabra", "resample", "rubberband"}
 TEMPO_PREPROCESS_MIN_MS = 700
 DEFAULT_PLAYBACK_FADE_MS = 5
 DEFAULT_IDLE_NOISE_AMPLITUDE = 96
